@@ -7,6 +7,7 @@ import * as session from "./session";
 import {
   DEFAULT_BOARD,
   flushPodScene,
+  hasPendingPodScene,
   loadPodScene,
   podStoreReady,
   savePodScene,
@@ -199,5 +200,208 @@ describe("flushPodScene / loadPodScene", () => {
         url.endsWith(`${DEFAULT_BOARD}.excalidraw`) && init?.method === "PUT",
     );
     expect(sceneWrite?.[1]?.keepalive).toBeUndefined();
+  });
+});
+
+// --- ROUND-4 Medium: durable pending — clear only on a RESOLVED write -------------------
+//
+// `keepalive: true` bodies are capped at ~64KB by the Fetch spec; an oversized scene PUT
+// REJECTS instead of falling back, and if `pending` were cleared before the write resolved
+// the save would be lost. These tests pin: (a) a large body at unload does NOT use keepalive,
+// (b) a failed / unresolved write does NOT clear `pending` (it survives for retry), and
+// (c) a successful flush DOES clear it.
+describe("pending durability (clear only on a resolved write)", () => {
+  // A serialiser whose body is comfortably over the 64 KiB keepalive cap.
+  const bigSerialize = () =>
+    JSON.stringify({
+      type: "excalidraw",
+      version: 2,
+      blob: "x".repeat(70_000),
+    });
+  const el = () =>
+    ({ id: "a", type: "rectangle" } as unknown as ExcalidrawElement);
+
+  it("a LARGE scene body at unload does NOT set keepalive (oversized → normal fetch)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(bigSerialize);
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    await flushPodScene({ keepalive: true });
+
+    const calls = sessionFetch().mock.calls as unknown as [
+      string,
+      RequestInit?,
+    ][];
+    const sceneWrite = calls.find(
+      ([url, init]) =>
+        url.endsWith(`${DEFAULT_BOARD}.excalidraw`) && init?.method === "PUT",
+    );
+    expect(sceneWrite).toBeDefined();
+    // Sanity: the body really is oversized (non-vacuous — the gate fired on size).
+    expect(
+      new TextEncoder().encode(sceneWrite?.[1]?.body as string).length,
+    ).toBeGreaterThan(64 * 1024);
+    // keepalive OFF so the request can't reject at the cap and lose the write.
+    expect(sceneWrite?.[1]?.keepalive).toBeUndefined();
+    // And because the (large) write succeeded here, pending is cleared.
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("does NOT lose the pending save when the unload-time write FAILS (survives for retry)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(bigSerialize);
+    // Let ACL PUTs succeed, but the scene body PUT FAILS (e.g. the unload window cut it off).
+    sessionFetch().mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (
+          (url as string).endsWith(`${DEFAULT_BOARD}.excalidraw`) &&
+          init?.method === "PUT"
+        ) {
+          return new Response("boom", {
+            status: 500,
+            statusText: "Server Error",
+          });
+        }
+        return new Response(null, { status: 201 });
+      },
+    );
+
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    await flushPodScene({ keepalive: true });
+
+    // The write did NOT resolve successfully → the pending snapshot is KEPT for retry.
+    expect(hasPendingPodScene()).toBe(true);
+  });
+
+  it("retries the kept-pending save on a SUBSEQUENT flush after the write recovers", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    let failNext = true;
+    sessionFetch().mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (
+          (url as string).endsWith(`${DEFAULT_BOARD}.excalidraw`) &&
+          init?.method === "PUT" &&
+          failNext
+        ) {
+          failNext = false;
+          return new Response("boom", { status: 500 });
+        }
+        return new Response(null, { status: 201 });
+      },
+    );
+
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    await flushPodScene(); // first attempt fails → pending kept
+    expect(hasPendingPodScene()).toBe(true);
+
+    await flushPodScene(); // retry succeeds → pending cleared
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("does NOT clear pending while the write has not RESOLVED (in-flight survives)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    let releaseScenePut!: () => void;
+    const sceneGate = new Promise<void>((r) => {
+      releaseScenePut = r;
+    });
+    sessionFetch().mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (
+          (url as string).endsWith(`${DEFAULT_BOARD}.excalidraw`) &&
+          init?.method === "PUT"
+        ) {
+          await sceneGate; // the scene body PUT hangs until released
+          return new Response(null, { status: 201 });
+        }
+        return new Response(null, { status: 201 });
+      },
+    );
+
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    const flushed = flushPodScene();
+    // The scene write is in-flight (not resolved) → pending must still be present.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(hasPendingPodScene()).toBe(true);
+
+    // Release the write; once it resolves, pending is cleared.
+    releaseScenePut();
+    await flushed;
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("a SUCCESSFUL flush clears pending", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    expect(hasPendingPodScene()).toBe(true);
+    await flushPodScene();
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("debounced save: clears pending on success, keeps it on failure", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+
+    // Success path: the debounced write resolves → pending cleared.
+    savePodScene([el()], { viewBackgroundColor: "#111" }, {});
+    expect(hasPendingPodScene()).toBe(true);
+    await vi.runAllTimersAsync();
+    expect(hasPendingPodScene()).toBe(false);
+
+    // Failure path: the debounced write 500s → pending kept for retry.
+    sessionFetch().mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (
+          (url as string).endsWith(`${DEFAULT_BOARD}.excalidraw`) &&
+          init?.method === "PUT"
+        ) {
+          return new Response("boom", { status: 500 });
+        }
+        return new Response(null, { status: 201 });
+      },
+    );
+    savePodScene([el()], { viewBackgroundColor: "#222" }, {});
+    await vi.runAllTimersAsync();
+    expect(hasPendingPodScene()).toBe(true);
+  });
+
+  it("a late-resolving older save does NOT clobber a NEWER pending edit", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    let scenePutCount = 0;
+    sessionFetch().mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (
+          (url as string).endsWith(`${DEFAULT_BOARD}.excalidraw`) &&
+          init?.method === "PUT"
+        ) {
+          scenePutCount += 1;
+          if (scenePutCount === 1) {
+            await firstGate; // hold the first save's scene PUT in-flight
+          }
+          return new Response(null, { status: 201 });
+        }
+        return new Response(null, { status: 201 });
+      },
+    );
+
+    savePodScene([el()], { viewBackgroundColor: "#111" }, {});
+    const firstFlush = flushPodScene(); // captures snapshot #1, write hangs
+    await Promise.resolve();
+
+    // A NEWER edit arrives while #1 is still in-flight.
+    savePodScene([el()], { viewBackgroundColor: "#222" }, {});
+    expect(hasPendingPodScene()).toBe(true);
+
+    // #1 finally resolves — it must NOT clear the newer pending (#2).
+    releaseFirst();
+    await firstFlush;
+    expect(hasPendingPodScene()).toBe(true);
   });
 });

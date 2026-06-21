@@ -56,6 +56,16 @@ import { establishContainerAcl, putResourceAcl } from "./acl";
 export const EXCALIDRAW_MIME = "application/vnd.excalidraw+json";
 const TURTLE = "text/turtle";
 
+/**
+ * Safe upper bound (in ENCODED bytes) for a `keepalive: true` request body. The Fetch
+ * spec caps the total in-flight keepalive body size at 64 KiB; a body past that REJECTS
+ * the request rather than degrading, so an oversized unload-time scene save would be
+ * LOST. We gate keepalive conservatively under the 64 KiB cap and issue a normal
+ * (non-keepalive) request for anything larger — best-effort within the unload window,
+ * with the pending state preserved for retry if it can't complete (see the controller).
+ */
+const KEEPALIVE_BODY_BUDGET_BYTES = 60_000;
+
 /** The plain shape Excalidraw saves/loads — elements + appState + files. */
 export interface SceneState {
   elements: readonly ExcalidrawElement[];
@@ -178,8 +188,10 @@ export class SolidStore {
     meta?: { title?: string; keepalive?: boolean },
   ): Promise<void> {
     // keepalive: a best-effort flag for the unload path — the scene/descriptor body PUTs are
-    // marked `keepalive` so the browser may complete them after the page goes away (subject
-    // to the 64KB keepalive cap; large scenes simply fall back to a normal request).
+    // marked `keepalive` so the browser may complete them after the page goes away. `putBody`
+    // SIZE-GATES this: a body over the ~64 KiB keepalive cap is sent as a NORMAL request
+    // instead (an oversized keepalive body would reject and lose the write), and the caller
+    // keeps the pending state for retry if the unload-time write doesn't resolve.
     const keepalive = meta?.keepalive === true;
     await this.ensureContainerAcl();
 
@@ -357,8 +369,15 @@ export class SolidStore {
 
   /**
    * PUT a text body to a resource, throwing on a non-2xx. `keepalive` (unload path) asks the
-   * browser to keep the request alive past page teardown — best-effort, subject to the 64KB
+   * browser to keep the request alive past page teardown — best-effort, subject to the 64 KiB
    * keepalive body cap.
+   *
+   * SIZE-GATE (round-4 Medium fix): a `keepalive: true` request whose body exceeds the
+   * Fetch-spec ~64 KiB keepalive cap REJECTS instead of falling back, so a large scene's
+   * unload-time save would be silently lost. We measure the ENCODED byte length and set
+   * `keepalive` ONLY when the body is within {@link KEEPALIVE_BODY_BUDGET_BYTES}; an
+   * oversized body is sent as a NORMAL (non-keepalive) request — which may not complete in
+   * the unload window, but the caller keeps the pending state for retry rather than losing it.
    */
   private async putBody(
     url: string,
@@ -366,16 +385,29 @@ export class SolidStore {
     contentType: string,
     keepalive = false,
   ): Promise<void> {
+    // Only honour keepalive when the encoded body is within the safe keepalive budget;
+    // an oversized keepalive body would reject (and lose the write) at the spec cap.
+    const useKeepalive =
+      keepalive && encodedByteLength(body) <= KEEPALIVE_BODY_BUDGET_BYTES;
     const res = await this.fetchFn(url, {
       method: "PUT",
       headers: { "content-type": contentType },
       body,
-      ...(keepalive ? { keepalive: true } : {}),
+      ...(useKeepalive ? { keepalive: true } : {}),
     });
     if (!res.ok) {
       throw new Error(`PUT ${url} -> ${res.status} ${res.statusText}`);
     }
   }
+}
+
+/**
+ * The length in ENCODED (UTF-8) bytes of a string — what the network actually sends, not
+ * `String.length` (which counts UTF-16 code units). Used to size-gate the keepalive flag
+ * against the Fetch-spec keepalive body cap.
+ */
+function encodedByteLength(body: string): number {
+  return new TextEncoder().encode(body).length;
 }
 
 /** Validate a board id / file id is a safe single-path-segment slug (no traversal). */

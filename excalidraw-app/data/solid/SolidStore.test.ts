@@ -271,6 +271,77 @@ describe("listing boards", () => {
   });
 });
 
+describe("keepalive size-gate (round-4 Medium: no keepalive for oversized bodies)", () => {
+  // The encoded scene-body PUT for the scene resource — the request the keepalive flag rides.
+  const scenePut = (pod: ReturnType<typeof fakePod>, sceneUrl: string) => {
+    const calls = (
+      pod.fetch as unknown as { mock: { calls: [string, RequestInit?][] } }
+    ).mock.calls;
+    return calls.find(
+      ([url, init]) => url === sceneUrl && (init?.method ?? "GET") === "PUT",
+    );
+  };
+
+  it("sets keepalive on a SMALL scene body (within the keepalive budget)", async () => {
+    const { store, pod } = makeStore();
+    await store.saveScene(
+      "small",
+      { elements: [], appState: { viewBackgroundColor: "#fff" }, files: {} },
+      { keepalive: true },
+    );
+    const put = scenePut(pod, store.sceneUrl("small"));
+    expect(put).toBeDefined();
+    // Sanity: the body really is small, so keepalive is genuinely safe (non-vacuous).
+    expect(
+      new TextEncoder().encode(put?.[1]?.body as string).length,
+    ).toBeLessThan(60_000);
+    expect(put?.[1]?.keepalive).toBe(true);
+  });
+
+  it("does NOT set keepalive on a LARGE scene body (> 64KB) — uses a normal fetch", async () => {
+    const pod = fakePod();
+    // A serialiser whose body exceeds the 64 KiB keepalive cap (a big scene at unload).
+    const bigSerialize = (): string =>
+      JSON.stringify({
+        type: "excalidraw",
+        version: 2,
+        blob: "x".repeat(70_000),
+      });
+    const store = new SolidStore({
+      container: CONTAINER,
+      webId: WEBID,
+      fetch: pod.fetch,
+      serialize: bigSerialize,
+    });
+
+    await store.saveScene(
+      "big",
+      { elements: [], appState: {}, files: {} },
+      { keepalive: true },
+    );
+
+    const put = scenePut(pod, store.sceneUrl("big"));
+    expect(put).toBeDefined();
+    // Sanity: the body really IS oversized (non-vacuous — proves the gate fired on size).
+    expect(
+      new TextEncoder().encode(put?.[1]?.body as string).length,
+    ).toBeGreaterThan(64 * 1024);
+    // keepalive must be OFF so the request does not reject at the cap (it would lose the write).
+    expect(put?.[1]?.keepalive).toBeUndefined();
+  });
+
+  it("never sets keepalive when not requested, regardless of size", async () => {
+    const { store, pod } = makeStore();
+    await store.saveScene(
+      "nokeep",
+      { elements: [], appState: {}, files: {} },
+      // no keepalive flag
+    );
+    const put = scenePut(pod, store.sceneUrl("nokeep"));
+    expect(put?.[1]?.keepalive).toBeUndefined();
+  });
+});
+
 describe("owner-only ordering (fail-closed)", () => {
   it("establishes the container ACL BEFORE any body, then body-before-acl per resource", async () => {
     const { store, pod } = makeStore();

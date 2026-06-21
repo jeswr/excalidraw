@@ -15,6 +15,7 @@ export type { BoardId, SceneState, SolidStoreConfig } from "./SolidStore";
 export {
   DEFAULT_BOARD,
   flushPodScene,
+  hasPendingPodScene,
   loadPodScene,
   podStoreReady,
   savePodScene,

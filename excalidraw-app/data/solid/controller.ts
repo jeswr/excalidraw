@@ -88,6 +88,16 @@ export function podStoreReady(): boolean {
 }
 
 /**
+ * True when there is an UNPERSISTED scene snapshot still pending a pod write — i.e. an
+ * edit is queued on the debounce, or a previous (unload-time) save did not resolve and
+ * was kept for retry. A "saved" state clears this; a failed / unresolved save does not.
+ * Lets the app decide whether unsynced work would be lost (e.g. before navigating away).
+ */
+export function hasPendingPodScene(): boolean {
+  return pending !== null;
+}
+
+/**
  * Mirror a scene save to the pod — DEBOUNCED + fail-soft. A no-op when no pod is wired,
  * so the call site (in `LocalData.save`) is safe to add unconditionally. The latest
  * pending state wins; errors are logged, never thrown.
@@ -107,19 +117,37 @@ export function savePodScene(
   saveTimer = setTimeout(() => {
     saveTimer = null;
     const state = pending;
-    pending = null;
     const s = store;
     if (!state || !s) {
       return;
     }
-    void s.saveScene(DEFAULT_BOARD, state).catch((err) => {
-      // eslint-disable-next-line no-console
-      console.warn(
-        "[solid] pod scene save failed (non-fatal):",
-        err instanceof Error ? err.message : err,
-      );
-    });
+    // Don't clear `pending` until the write RESOLVES — if it rejects, the state must
+    // survive for the next debounce / flush rather than being silently dropped.
+    void s.saveScene(DEFAULT_BOARD, state).then(
+      () => {
+        clearPendingIfUnchanged(state);
+      },
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[solid] pod scene save failed (non-fatal, kept for retry):",
+          err instanceof Error ? err.message : err,
+        );
+      },
+    );
   }, POD_SAVE_DEBOUNCE);
+}
+
+/**
+ * Clear the pending snapshot ONLY if it is still the exact state we just persisted — so a
+ * fresh edit that arrived during the in-flight write (a NEWER `pending`) is preserved and
+ * not clobbered by a late-resolving older save. Identity comparison is sufficient: each
+ * `savePodScene` / flush captures the live `pending` object by reference.
+ */
+function clearPendingIfUnchanged(persisted: SceneState): void {
+  if (pending === persisted) {
+    pending = null;
+  }
 }
 
 /**
@@ -129,9 +157,16 @@ export function savePodScene(
  *
  * Pass `{ keepalive: true }` on the page-teardown path (pagehide/unload/beforeunload) where
  * the caller can't await — the body PUT is then marked `keepalive` so the browser may
- * complete it after the page goes away (best-effort, 64KB cap). When the caller CAN await
- * (e.g. before an explicit disconnect), omit it and `await` the returned promise for
- * durability.
+ * complete it after the page goes away (best-effort, size-gated under the 64 KiB cap; an
+ * oversized body falls back to a normal request — see {@link SolidStore}). When the caller
+ * CAN await (e.g. before an explicit disconnect), omit it and `await` the returned promise
+ * for durability.
+ *
+ * DURABILITY (round-4 Medium fix): the pending snapshot is cleared ONLY after the write
+ * actually RESOLVES. If the unload-time save fails or can't complete in the unload window
+ * (e.g. a large body that fell back to a normal request the browser then cancels), the
+ * pending state SURVIVES so it is retried on the next debounce / flush / app load — a
+ * best-effort durability guarantee rather than silent loss.
  */
 export async function flushPodScene(opts?: {
   keepalive?: boolean;
@@ -141,17 +176,19 @@ export async function flushPodScene(opts?: {
     saveTimer = null;
   }
   const state = pending;
-  pending = null;
   const s = store;
   if (!state || !s) {
     return;
   }
   try {
     await s.saveScene(DEFAULT_BOARD, state, { keepalive: opts?.keepalive });
+    // Clear ONLY after the write resolved — and only if no newer edit superseded it.
+    clearPendingIfUnchanged(state);
   } catch (err) {
+    // The write didn't resolve: KEEP `pending` so the save is retried (durability), not lost.
     // eslint-disable-next-line no-console
     console.warn(
-      "[solid] pod scene flush failed (non-fatal):",
+      "[solid] pod scene flush failed (non-fatal, kept for retry):",
       err instanceof Error ? err.message : err,
     );
   }
