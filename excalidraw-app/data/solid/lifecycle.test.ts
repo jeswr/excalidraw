@@ -221,4 +221,37 @@ describe("connectSolidPod — the explicit (popup) affordance", () => {
     disconnectSolidPod();
     expect(podStoreReady()).toBe(false);
   });
+
+  // --- ROUND-3 Medium #1: all-or-nothing connect — roll back on wire/hydrate failure -----
+  it("a throw during hydrate AFTER login fully rolls back (no active session/fetch/store)", async () => {
+    interactiveLoginMock.mockImplementation(async () => {
+      connected = true; // login succeeded → session/fetch are now active
+      return WEBID;
+    });
+    // The pod already has a scene so loadPodScene returns it → hydrate runs and THROWS,
+    // simulating a wiring/hydration failure after a successful login.
+    podFetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const method = (init?.method ?? "GET").toUpperCase();
+      if (method === "PUT") {
+        return new Response(null, { status: 201, headers: { etag: '"v1"' } });
+      }
+      if (url.endsWith("default.excalidraw")) {
+        return new Response(SERIALIZED, {
+          status: 200,
+          headers: { "content-type": "application/vnd.excalidraw+json" },
+        });
+      }
+      return new Response(null, { status: 404 });
+    });
+    hydrate.mockImplementationOnce(async () => {
+      throw new Error("hydrate boom");
+    });
+
+    await expect(connectSolidPod(opts())).rejects.toThrow("hydrate boom");
+
+    // FULLY ROLLED BACK: the session is no longer connected (disconnectSolid ran) and the
+    // pod store was torn down — no partial connect left active.
+    expect(connected).toBe(false);
+    expect(podStoreReady()).toBe(false);
+  });
 });

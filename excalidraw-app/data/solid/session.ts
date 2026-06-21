@@ -2,17 +2,31 @@
 /**
  * Solid session wiring for the Excalidraw→Solid fork.
  *
- * AUTH MODEL. Two paths produce the authenticated `fetch` the pod store uses:
- *   - INTERACTIVE login ({@link interactiveLogin}) registers a `ReactiveFetchManager` with
- *     a WebID-first DPoP token provider; `registerGlobally()` upgrades every `fetch()` that
- *     gets a 401 from a pod by attaching a DPoP-bound token. That patched global is then
- *     installed as the session fetch via {@link setSolidFetch}.
+ * AUTH MODEL. Two paths produce a SCOPED authenticated `fetch` the pod store uses — NEITHER
+ * patches `globalThis.fetch` (round-3 HIGH fix; see below):
+ *   - INTERACTIVE login ({@link interactiveLogin}) builds a `ReactiveFetchManager` with a
+ *     WebID-first DPoP token provider and installs its SCOPED `manager.fetch` accessor (NOT
+ *     `registerGlobally()`). That scoped fetch upgrades a request that gets a 401 from a pod
+ *     by attaching a DPoP-bound token (the popup fires there), and is installed as the
+ *     session fetch via {@link setSolidFetch}. `globalThis.fetch` is left untouched.
  *   - SILENT restore ({@link silentRestore}) has NO reactive manager — it redeems the
  *     persisted refresh token and builds a DPoP-attaching fetch from the restored
  *     credential ({@link dpopAuthedFetch}), installing THAT as the session fetch.
  * {@link solidFetch} returns whichever is installed (NOT the bare global — that was the
  * round-1 bug that left restored sessions un-authed). We track the WebID separately so the
  * rest of the app knows a pod is connected and where to write.
+ *
+ * SCOPED-FETCH RULE (round-3 HIGH fix). `registerGlobally()` was the round-1/2 mechanism —
+ * it replaces `globalThis.fetch` with the manager's reactive fetch. That leaked: after a
+ * {@link disconnectSolid} the patched global SURVIVED, so unrelated app fetches kept being
+ * intercepted/auth-upgraded with the dead Solid provider, and each repeated connect STACKED
+ * another global manager. The fix uses the manager's SCOPED `fetch` accessor (a bound
+ * reactive fetch that does the 401→upgrade logic without touching the global) stored ONLY in
+ * {@link solidFetch} and used solely by the `SolidStore` / pod calls. After
+ * {@link disconnectSolid}, `globalThis.fetch` is the original (it was never patched) and no
+ * Solid provider intercepts unrelated requests; repeated connect/disconnect cannot stack
+ * global managers. (The cleaner of the two options the review proposed — the global-restore
+ * fallback was unnecessary because reactive-auth exposes a scoped `manager.fetch`.)
  *
  * SILENT SESSION RESTORE (cross-app UX invariant #1, a HARDENING RULE here):
  * {@link silentRestore} re-establishes a session on load from the persisted DPoP
@@ -37,10 +51,9 @@ let currentDrawingsContainer: string | null = null;
 /**
  * The authenticated `fetch` for pod requests. `null` until a session is established.
  *
- * Two paths install it:
- *   - INTERACTIVE login installs the patched `globalThis.fetch` from
- *     `ReactiveFetchManager.registerGlobally()` (which attaches DPoP-bound tokens on a
- *     401). The caller passes that global through {@link setSolidFetch}.
+ * Two paths install it, NEITHER patching `globalThis.fetch`:
+ *   - INTERACTIVE login installs the SCOPED `ReactiveFetchManager.fetch` accessor (a bound
+ *     reactive fetch that attaches DPoP-bound tokens on a 401) — NOT `registerGlobally()`.
  *   - SILENT restore has NO reactive manager; it builds a DPoP-attaching fetch from the
  *     restored credential ({@link dpopAuthedFetch}) and installs it here.
  *
@@ -69,9 +82,10 @@ export const SESSION_DB_NAME = "excalidraw-solid:sessions";
 
 /**
  * The authenticated `fetch` for pod requests. Returns the session-installed authed fetch
- * once one is set (silent-restore credential fetch OR the reactive-auth-patched global);
- * before any session it falls back to the bare global (used only for PUBLIC reads such as
- * dereferencing a WebID profile during connect).
+ * once one is set (silent-restore credential fetch OR the interactive path's SCOPED
+ * `manager.fetch`); before any session it falls back to the bare global (used only for
+ * PUBLIC reads such as dereferencing a WebID profile during connect). The global is never
+ * patched, so this is the ONLY surface through which Solid auth is applied.
  */
 export function solidFetch(): typeof globalThis.fetch {
   if (currentFetch) {
@@ -82,9 +96,9 @@ export function solidFetch(): typeof globalThis.fetch {
 
 /**
  * Install the authenticated `fetch` for the live session. The interactive-login path
- * passes the reactive-auth-patched `globalThis.fetch`; the silent-restore path passes a
- * DPoP-attaching fetch built from the restored credential. Pass `null` to revert to the
- * bare global (disconnect).
+ * passes the reactive-auth manager's SCOPED `fetch` (NOT the patched global); the
+ * silent-restore path passes a DPoP-attaching fetch built from the restored credential.
+ * Pass `null` to revert to the bare global (disconnect).
  */
 export function setSolidFetch(fetchImpl: typeof globalThis.fetch | null): void {
   currentFetch = fetchImpl;
@@ -305,8 +319,9 @@ export async function silentRestore(): Promise<string | null> {
 /**
  * Connect a Solid pod: record the WebID, resolve the `…/drawings/` container, persist
  * the WebID + the credential-free remembered pointer (for next-load silent restore).
- * The reactive-auth manager (registered by the caller) makes `globalThis.fetch` the
- * authed fetch, so no token is stored here.
+ * The authed fetch is whatever the caller installed via {@link setSolidFetch} — the
+ * interactive path's SCOPED `manager.fetch` or silent restore's `dpopAuthedFetch` — read
+ * here via {@link solidFetch}; no token is stored.
  */
 export async function connectSolid(webId: string): Promise<void> {
   const fetchImpl = solidFetch();
@@ -348,12 +363,18 @@ function isLoopbackOrigin(): boolean {
 
 /**
  * INTERACTIVE Solid login — the ONLY place a popup/redirect is allowed (an explicit user
- * action, e.g. the "Connect Solid pod" button). Registers the reactive-auth manager with
- * a WebID-first DPoP token provider (static `client_id`), patches `globalThis.fetch` to
- * attach DPoP-bound tokens on a 401, asks the user for their WebID, then drives one authed
- * request (the storage-root profile read inside {@link connectSolid}) which triggers the
- * authorization-code popup. On success the patched global is installed as the session
- * fetch and the pod state is connected; returns the connected WebID.
+ * action, e.g. the "Connect Solid pod" button). Builds a reactive-auth manager with a
+ * WebID-first DPoP token provider (static `client_id`) and installs its SCOPED `fetch`
+ * accessor — which attaches DPoP-bound tokens on a 401 WITHOUT patching `globalThis.fetch`.
+ * It asks the user for their WebID, then drives one authed request (the storage-root profile
+ * read inside {@link connectSolid}) through that scoped fetch, which triggers the
+ * authorization-code popup on the first 401. On success the scoped fetch is installed as the
+ * session fetch and the pod state is connected; returns the connected WebID.
+ *
+ * IDEMPOTENT CONNECT (round-3 HIGH fix). Any prior session is cleared first via
+ * {@link disconnectSolid} so a repeated connect cannot stack managers / leave a stale authed
+ * fetch — each connect starts from a clean state and `globalThis.fetch` is never touched, so
+ * a later disconnect leaves no Solid interception behind.
  *
  * Throws / rejects when the user cancels the WebID dialog or the authorization popup.
  *
@@ -364,6 +385,10 @@ export async function interactiveLogin(initialWebId?: string): Promise<string> {
   if (typeof window === "undefined" || typeof document === "undefined") {
     throw new Error("interactiveLogin requires a browser environment");
   }
+  // Idempotent connect: clear any prior session/fetch so repeated connects don't stack a
+  // second manager or keep a stale authed fetch around. (No global was ever patched, so
+  // there is nothing global to unwind — just our own state.)
+  disconnectSolid();
   // Grab the manager + the custom-element class from the package barrel. We define the
   // element ourselves (idempotently) instead of importing the side-effect-only
   // `/registerElements` subpath, which the root tsconfig's `node` resolution can't see.
@@ -411,11 +436,13 @@ export async function interactiveLogin(initialWebId?: string): Promise<string> {
     },
   );
   const manager = new ReactiveFetchManager([provider]);
-  manager.registerGlobally();
 
-  // The patched global now attaches DPoP tokens on a 401 (the popup fires there). Install
-  // it as the session fetch so connect's profile read + every pod write is authed.
-  setSolidFetch((globalThis.fetch ?? fetch).bind(globalThis));
+  // Install the manager's SCOPED reactive fetch (NOT registerGlobally()): it attaches DPoP
+  // tokens on a 401 (the popup fires there) WITHOUT patching globalThis.fetch, so unrelated
+  // app fetches are never intercepted and a later disconnect leaves no Solid interception
+  // behind. connect's profile read + every pod write go through this scoped fetch via
+  // solidFetch().
+  setSolidFetch(manager.fetch);
 
   // connect performs an authed profile read → the first 401 triggers the authorization
   // popup; on success the WebID + container are recorded.
@@ -423,7 +450,13 @@ export async function interactiveLogin(initialWebId?: string): Promise<string> {
   return webId;
 }
 
-/** Disconnect the pod: clear state + the authed fetch + persisted WebID + remembered pointer. */
+/**
+ * Disconnect the pod: clear state + the scoped authed fetch + persisted WebID + remembered
+ * pointer. Because the interactive path installs a SCOPED `manager.fetch` (never patches
+ * `globalThis.fetch`), clearing `currentFetch` is sufficient — `solidFetch()` reverts to the
+ * bare global and NO Solid provider intercepts unrelated requests afterward. There is no
+ * global to restore and no manager left registered to stack on the next connect.
+ */
 export function disconnectSolid(): void {
   currentWebId = null;
   currentDrawingsContainer = null;

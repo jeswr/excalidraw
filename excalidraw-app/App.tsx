@@ -133,6 +133,7 @@ import {
   bootstrapSolid,
   connectSolidPod,
   disconnectSolidPod,
+  flushPodScene,
   persistedSolidWebId,
 } from "./data/solid";
 import { solidLifecycleOptions } from "./data/solid/app-integration";
@@ -625,13 +626,20 @@ const ExcalidrawWrapper = () => {
       }
     }, SYNC_BROWSER_TABS_TIMEOUT);
 
+    // Solid: LocalData.flushSave() only enqueues savePodScene() onto the pod write's OWN
+    // ~2s debounce, so the latest pod edits can be lost on hide/close. flushPodScene()
+    // forces that pending pod write out immediately (it cancels the debounce and starts the
+    // write now). We can't await here (the page is going away), so we pass keepalive:true so
+    // the body PUT may complete after teardown (best-effort, non-blocking).
     const onUnload = () => {
       LocalData.flushSave();
+      void flushPodScene({ keepalive: true });
     };
 
     const visibilityChange = (event: FocusEvent | Event) => {
       if (event.type === EVENT.BLUR || document.hidden) {
         LocalData.flushSave();
+        void flushPodScene({ keepalive: true });
       }
       if (
         event.type === EVENT.VISIBILITY_CHANGE ||
@@ -641,14 +649,23 @@ const ExcalidrawWrapper = () => {
       }
     };
 
+    // pagehide is the most reliable "tab is going away" signal (fires on bfcache + close
+    // where unload may not); flush the pending pod write there too (best-effort/keepalive).
+    const onPageHide = () => {
+      LocalData.flushSave();
+      void flushPodScene({ keepalive: true });
+    };
+
     window.addEventListener(EVENT.HASHCHANGE, onHashChange, false);
     window.addEventListener(EVENT.UNLOAD, onUnload, false);
+    window.addEventListener("pagehide", onPageHide, false);
     window.addEventListener(EVENT.BLUR, visibilityChange, false);
     document.addEventListener(EVENT.VISIBILITY_CHANGE, visibilityChange, false);
     window.addEventListener(EVENT.FOCUS, visibilityChange, false);
     return () => {
       window.removeEventListener(EVENT.HASHCHANGE, onHashChange, false);
       window.removeEventListener(EVENT.UNLOAD, onUnload, false);
+      window.removeEventListener("pagehide", onPageHide, false);
       window.removeEventListener(EVENT.BLUR, visibilityChange, false);
       window.removeEventListener(EVENT.FOCUS, visibilityChange, false);
       document.removeEventListener(
@@ -662,6 +679,9 @@ const ExcalidrawWrapper = () => {
   useEffect(() => {
     const unloadHandler = (event: BeforeUnloadEvent) => {
       LocalData.flushSave();
+      // Flush the pending pod write too (it has its own ~2s debounce) so pod edits aren't
+      // lost on close — best-effort/keepalive, can't await here.
+      void flushPodScene({ keepalive: true });
 
       if (
         excalidrawAPI &&
@@ -736,7 +756,10 @@ const ExcalidrawWrapper = () => {
   }, [excalidrawAPI]);
 
   /** Explicit disconnect: stop pod persistence, fall back to the local path. */
-  const onDisconnectSolid = useCallback(() => {
+  const onDisconnectSolid = useCallback(async () => {
+    // Flush any pending pod write BEFORE tearing the store down, so the last edits land on
+    // the pod rather than being dropped with the pending debounce. Here we can await.
+    await flushPodScene();
     disconnectSolidPod();
     setSolidWebId(null);
   }, []);

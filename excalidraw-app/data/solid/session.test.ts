@@ -196,3 +196,164 @@ describe("disconnectSolid clears the installed authed fetch", () => {
     expect(solidWebId()).toBeNull();
   });
 });
+
+// --- ROUND-3 HIGH: interactiveLogin uses a SCOPED fetch, never patches the global -------
+describe("interactiveLogin — SCOPED fetch, globalThis.fetch never patched (HIGH fix)", () => {
+  /**
+   * A fake ReactiveFetchManager mirroring the real one's contract: `fetch` is a SCOPED
+   * accessor (does the 401→upgrade reactive logic against globalThis.fetch WITHOUT touching
+   * it), `registerGlobally()` would patch the global. The test asserts interactiveLogin uses
+   * `fetch` and NEVER calls `registerGlobally()`.
+   */
+  let registerGloballyCalls = 0;
+  let managerInstances = 0;
+
+  function setupInteractiveMocks(): void {
+    registerGloballyCalls = 0;
+    managerInstances = 0;
+
+    class FakeManager {
+      #global: typeof globalThis.fetch;
+      constructor(_providers: unknown) {
+        managerInstances += 1;
+        this.#global = globalThis.fetch;
+      }
+      registerGlobally() {
+        registerGloballyCalls += 1;
+        // The real one does `globalThis.fetch = this.fetch`. We DELIBERATELY do that here
+        // so the test would FAIL (global mutated) if interactiveLogin ever called this.
+        globalThis.fetch = this.fetch;
+      }
+      get fetch(): typeof globalThis.fetch {
+        // A scoped reactive fetch: on a 401 it would attach a token; here it just delegates
+        // (the popup/upgrade path is out of scope — we only assert the global isn't patched).
+        const scoped = (async (input: RequestInfo | URL, init?: RequestInit) =>
+          this.#global(input as RequestInfo, init)) as typeof globalThis.fetch;
+        return scoped;
+      }
+    }
+
+    // A valid custom-element class (a real HTMLElement subclass) so jsdom's
+    // customElements.define + document.createElement("authorization-code-flow") succeed.
+    // getCode is present but never invoked (connect's profile read is stubbed to not 401).
+    class FakeAuthCodeFlow extends HTMLElement {
+      async getCode(_uri: URL, _signal: AbortSignal): Promise<string> {
+        return "unused-code";
+      }
+    }
+
+    vi.doMock("@solid/reactive-authentication", () => ({
+      ReactiveFetchManager: FakeManager,
+      AuthorizationCodeFlow: FakeAuthCodeFlow,
+    }));
+
+    // The WebID dialog + token provider — interactiveLogin imports these dynamically. The
+    // provider is constructed but never exercised (connect's profile read is stubbed below).
+    vi.doMock("./webid-token-provider.js", () => ({
+      WebIdDPoPTokenProvider: class {},
+      promptWebIdDialog: async () => WEBID,
+    }));
+
+    // connectSolid → resolveStorageRoot + resolveOidcIssuer dereference the profile; stub.
+    vi.doMock("@jeswr/fetch-rdf", () => ({
+      fetchRdf: async () => ({
+        dataset: { match: () => [][Symbol.iterator]() },
+      }),
+    }));
+
+    // interactiveLogin's idempotent-connect disconnectSolid() + connectSolid() touch the
+    // session-restore package (clear/write the remembered pointer); stub it so the test
+    // doesn't load the real package or leave an unhandled rejection.
+    vi.doMock("@jeswr/solid-session-restore", () => ({
+      RememberedAccount: class {
+        read() {
+          return null;
+        }
+        clear() {}
+        write() {}
+      },
+    }));
+
+    // jsdom provides window/document; ensure customElements exists for the define() guard.
+    if (typeof customElements === "undefined") {
+      // @ts-expect-error — minimal shim for the non-DOM-complete envs.
+      globalThis.customElements = { get: () => undefined, define: () => {} };
+    }
+  }
+
+  it("after connect→disconnect, globalThis.fetch is the ORIGINAL (identity), no Solid interception", async () => {
+    setupInteractiveMocks();
+    const original = globalThis.fetch;
+
+    vi.resetModules();
+    const sessionMod = await import("./session");
+
+    await sessionMod.interactiveLogin(WEBID);
+
+    // The scoped manager fetch was installed as the SESSION fetch (solidFetch), and it is
+    // NOT the bare global (it does the reactive upgrade for pod calls)…
+    expect(sessionMod.solidFetch()).not.toBe(original);
+    // …but the GLOBAL was never patched.
+    expect(registerGloballyCalls).toBe(0);
+    expect(globalThis.fetch).toBe(original);
+
+    sessionMod.disconnectSolid();
+
+    // After disconnect: the global is STILL the original (never patched, nothing to restore),
+    // and solidFetch reverts to the bare global → no Solid provider intercepts anything.
+    expect(globalThis.fetch).toBe(original);
+    expect(sessionMod.solidConnected()).toBe(false);
+  });
+
+  it("a non-pod fetch is NOT auth-upgraded after connect→disconnect", async () => {
+    setupInteractiveMocks();
+    // The spy IS globalThis.fetch for the duration of the test; the manager constructor
+    // snapshots it. If interactiveLogin patched the global, this spy would be replaced.
+    const baseSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+    const spiedGlobal = globalThis.fetch;
+
+    vi.resetModules();
+    const sessionMod = await import("./session");
+    await sessionMod.interactiveLogin(WEBID);
+    sessionMod.disconnectSolid();
+
+    // The global is STILL the spy — interactiveLogin never replaced it (no registerGlobally).
+    expect(globalThis.fetch).toBe(spiedGlobal);
+    expect(registerGloballyCalls).toBe(0);
+
+    // An UNRELATED app fetch after disconnect goes straight through the bare global with no
+    // Authorization/DPoP header attached (the Solid provider does not intercept it).
+    baseSpy.mockClear();
+    await globalThis.fetch("https://unrelated.example/api/thing");
+    const sent = baseSpy.mock.calls.at(-1)?.[0];
+    const req =
+      sent instanceof Request ? sent : new Request(sent as RequestInfo);
+    expect(req.headers.get("Authorization")).toBeNull();
+    expect(req.headers.get("DPoP")).toBeNull();
+  });
+
+  it("two connects do NOT stack global managers (idempotent connect)", async () => {
+    setupInteractiveMocks();
+    const original = globalThis.fetch;
+
+    vi.resetModules();
+    const sessionMod = await import("./session");
+
+    await sessionMod.interactiveLogin(WEBID);
+    await sessionMod.interactiveLogin(WEBID);
+
+    // registerGlobally() was NEVER called (so nothing was stacked onto the global), and the
+    // global is still the original after two connects.
+    expect(registerGloballyCalls).toBe(0);
+    expect(globalThis.fetch).toBe(original);
+    // Two managers were constructed (one per connect) but neither touched the global; the
+    // second connect first cleared the first via the idempotent disconnect.
+    expect(managerInstances).toBe(2);
+    expect(sessionMod.solidConnected()).toBe(true);
+
+    sessionMod.disconnectSolid();
+    expect(globalThis.fetch).toBe(original);
+  });
+});

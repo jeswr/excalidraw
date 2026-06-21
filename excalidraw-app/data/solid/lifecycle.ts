@@ -108,13 +108,27 @@ export async function bootstrapSolid(
  * EXPLICIT "Connect Solid pod" — interactive login (the only popup path), then wire the
  * pod store + hydrate the canvas from the pod. Returns the connected WebID. Rejects if the
  * user cancels login (the editor stays on the local path); the caller surfaces the error.
+ *
+ * ALL-OR-NOTHING (round-3 Medium #1 fix). `interactiveLogin` mutates session state
+ * (WebID + scoped authed fetch) BEFORE wiring/hydration. If `wireAndHydrate` throws after a
+ * successful login, the session/fetch/store would otherwise stay active while the UI is left
+ * on the local path — a partial connect. We therefore wrap the post-login wiring in a
+ * try/catch and, on failure, fully roll back via {@link disconnectSolidPod} (tear down the
+ * store + clear the session/fetch/WebID/container) before rethrowing, so a failed connect
+ * leaves NO active Solid session.
  */
 export async function connectSolidPod(
   opts: SolidLifecycleOptions,
   initialWebId?: string,
 ): Promise<string> {
   const webId = await interactiveLogin(initialWebId);
-  await wireAndHydrate(opts);
+  try {
+    await wireAndHydrate(opts);
+  } catch (err) {
+    // Roll back the just-established session/fetch/store so the connect is all-or-nothing.
+    disconnectSolidPod();
+    throw err;
+  }
   return webId;
 }
 

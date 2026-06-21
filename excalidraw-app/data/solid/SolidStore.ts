@@ -30,9 +30,10 @@
  * the store REFUSES to write. Per resource the BODY is written FIRST, then its own
  * owner-only `.acl` (which throws on any non-2xx except a documented 405). See `acl.ts`.
  *
- * AUTH. A `fetch` is injected (the auth seam) — `@solid/reactive-authentication`
- * patches `globalThis.fetch`, but the store takes an explicit `fetch` so it is
- * unit-testable without a server and works with any authed-fetch implementation.
+ * AUTH. A `fetch` is injected (the auth seam) — the session installs a SCOPED authed
+ * fetch (the reactive-auth manager's `fetch` accessor, or a DPoP-attaching fetch from a
+ * restored credential); `globalThis.fetch` is never patched. The store takes an explicit
+ * `fetch` so it is unit-testable without a server and works with any authed-fetch impl.
  *
  * RDF discipline: the descriptor is serialised by `@jeswr/solid-drawing` (n3.Writer
  * under the hood) and read back via `@jeswr/fetch-rdf`'s `parseSceneTtl`. No
@@ -174,8 +175,12 @@ export class SolidStore {
   async saveScene(
     board: BoardId,
     state: SceneState,
-    meta?: { title?: string },
+    meta?: { title?: string; keepalive?: boolean },
   ): Promise<void> {
+    // keepalive: a best-effort flag for the unload path — the scene/descriptor body PUTs are
+    // marked `keepalive` so the browser may complete them after the page goes away (subject
+    // to the 64KB keepalive cap; large scenes simply fall back to a normal request).
+    const keepalive = meta?.keepalive === true;
     await this.ensureContainerAcl();
 
     // 1. Image blobs → sibling resources (body-first, then per-resource ACL).
@@ -192,7 +197,7 @@ export class SolidStore {
     //    additional WAC-able resources, not required for fidelity.
     const body = this.serialize(state);
     const sceneUrl = this.sceneUrl(board);
-    await this.putBody(sceneUrl, body, EXCALIDRAW_MIME);
+    await this.putBody(sceneUrl, body, EXCALIDRAW_MIME, keepalive);
     await putResourceAcl(this.fetchFn, sceneUrl, this.webId);
 
     // 3. The small RDF descriptor pointing at the byte-exact scene resource.
@@ -208,7 +213,7 @@ export class SolidStore {
           ? state.appState.viewBackgroundColor
           : undefined,
     });
-    await this.putBody(descriptorUrl, ttl, TURTLE);
+    await this.putBody(descriptorUrl, ttl, TURTLE, keepalive);
     await putResourceAcl(this.fetchFn, descriptorUrl, this.webId);
   }
 
@@ -350,16 +355,22 @@ export class SolidStore {
     };
   }
 
-  /** PUT a text body to a resource, throwing on a non-2xx. */
+  /**
+   * PUT a text body to a resource, throwing on a non-2xx. `keepalive` (unload path) asks the
+   * browser to keep the request alive past page teardown — best-effort, subject to the 64KB
+   * keepalive body cap.
+   */
   private async putBody(
     url: string,
     body: string,
     contentType: string,
+    keepalive = false,
   ): Promise<void> {
     const res = await this.fetchFn(url, {
       method: "PUT",
       headers: { "content-type": contentType },
       body,
+      ...(keepalive ? { keepalive: true } : {}),
     });
     if (!res.ok) {
       throw new Error(`PUT ${url} -> ${res.status} ${res.statusText}`);

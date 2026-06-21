@@ -139,4 +139,65 @@ describe("flushPodScene / loadPodScene", () => {
     wirePodStore(serialize);
     expect(await loadPodScene()).toBeUndefined();
   });
+
+  // --- ROUND-3 Medium #2: the unload path flushes the pending pod write ------------------
+  it("flushes the pending pod write IMMEDIATELY (not left on the 2s debounce)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const el = { id: "a", type: "rectangle" } as unknown as ExcalidrawElement;
+
+    // Enqueue a save onto the pod write's OWN ~2s debounce, then flush WITHOUT advancing the
+    // timers — the write must happen now, proving it isn't left on the 2s debounce.
+    savePodScene([el], { viewBackgroundColor: "#abc" }, {});
+    await flushPodScene();
+
+    const calls = sessionFetch().mock.calls as unknown as [
+      string,
+      RequestInit?,
+    ][];
+    const sceneWrite = calls.find(
+      ([url, init]) =>
+        url.endsWith(`${DEFAULT_BOARD}.excalidraw`) && init?.method === "PUT",
+    );
+    expect(sceneWrite).toBeDefined();
+  });
+
+  it("keepalive:true threads to the scene body PUT (pagehide best-effort)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const el = { id: "a", type: "rectangle" } as unknown as ExcalidrawElement;
+
+    savePodScene([el], { viewBackgroundColor: "#abc" }, {});
+    await flushPodScene({ keepalive: true });
+
+    const calls = sessionFetch().mock.calls as unknown as [
+      string,
+      RequestInit?,
+    ][];
+    const sceneWrite = calls.find(
+      ([url, init]) =>
+        url.endsWith(`${DEFAULT_BOARD}.excalidraw`) && init?.method === "PUT",
+    );
+    expect(sceneWrite).toBeDefined();
+    expect(sceneWrite?.[1]?.keepalive).toBe(true);
+  });
+
+  it("a plain flush (await-able, e.g. before disconnect) does NOT set keepalive", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const el = { id: "a", type: "rectangle" } as unknown as ExcalidrawElement;
+
+    savePodScene([el], { viewBackgroundColor: "#abc" }, {});
+    await flushPodScene();
+
+    const calls = sessionFetch().mock.calls as unknown as [
+      string,
+      RequestInit?,
+    ][];
+    const sceneWrite = calls.find(
+      ([url, init]) =>
+        url.endsWith(`${DEFAULT_BOARD}.excalidraw`) && init?.method === "PUT",
+    );
+    expect(sceneWrite?.[1]?.keepalive).toBeUndefined();
+  });
 });

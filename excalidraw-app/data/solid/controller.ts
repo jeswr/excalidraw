@@ -123,10 +123,19 @@ export function savePodScene(
 }
 
 /**
- * Force-flush any pending debounced pod save immediately (e.g. on tab hide / logout).
- * Returns the in-flight save promise so callers may await durability.
+ * Force-flush any pending debounced pod save immediately (e.g. on tab hide / logout /
+ * disconnect). The pod write has its OWN ~2s debounce, so without this the latest edits can
+ * be lost on hide/close; this cancels the debounce and starts the write NOW.
+ *
+ * Pass `{ keepalive: true }` on the page-teardown path (pagehide/unload/beforeunload) where
+ * the caller can't await — the body PUT is then marked `keepalive` so the browser may
+ * complete it after the page goes away (best-effort, 64KB cap). When the caller CAN await
+ * (e.g. before an explicit disconnect), omit it and `await` the returned promise for
+ * durability.
  */
-export async function flushPodScene(): Promise<void> {
+export async function flushPodScene(opts?: {
+  keepalive?: boolean;
+}): Promise<void> {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -138,7 +147,7 @@ export async function flushPodScene(): Promise<void> {
     return;
   }
   try {
-    await s.saveScene(DEFAULT_BOARD, state);
+    await s.saveScene(DEFAULT_BOARD, state, { keepalive: opts?.keepalive });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(
