@@ -21,6 +21,12 @@ export const AppMainMenu: React.FC<{
   isCollabEnabled: boolean;
   theme: Theme | "system";
   refresh: () => void;
+  /** The connected Solid WebID, or null/undefined when on the local path. */
+  solidWebId?: string | null;
+  /** Explicit "Connect Solid pod" — the only popup path (explicit user action). */
+  onConnectSolid?: () => void;
+  /** Explicit "Disconnect Solid pod" — fall back to the local path. */
+  onDisconnectSolid?: () => void;
 }> = React.memo((props) => {
   return (
     <MainMenu>
@@ -28,6 +34,19 @@ export const AppMainMenu: React.FC<{
       <MainMenu.DefaultItems.SaveToActiveFile />
       <MainMenu.DefaultItems.Export />
       <MainMenu.DefaultItems.SaveAsImage />
+      {(props.onConnectSolid || props.onDisconnectSolid) && (
+        <MainMenu.Item
+          icon={loginIcon}
+          onSelect={() =>
+            props.solidWebId
+              ? props.onDisconnectSolid?.()
+              : props.onConnectSolid?.()
+          }
+          data-testid="solid-connect-menu-item"
+        >
+          {props.solidWebId ? "Disconnect Solid pod" : "Connect Solid pod"}
+        </MainMenu.Item>
+      )}
       {props.isCollabEnabled && (
         <MainMenu.DefaultItems.LiveCollaborationTrigger
           isCollaborating={props.isCollaborating}

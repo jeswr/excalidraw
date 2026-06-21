@@ -76,7 +76,10 @@ export interface SolidStoreConfig {
   /**
    * Serialise (elements, appState, files) to the byte-exact `.excalidraw` body.
    * Injected so the store doesn't import Excalidraw's whole `data/json` graph (and
-   * is unit-testable). The app wires Excalidraw's real `serializeAsJSON(…, "database")`.
+   * is unit-testable). The app wires Excalidraw's real `serializeAsJSON(…, "local")` —
+   * the self-contained `.excalidraw` JSON (files inline). The sibling image blobs are
+   * written additionally as individually-WAC-able pod resources; the byte-exact body
+   * alone is sufficient to reconstitute the scene on load.
    */
   serialize: (state: SceneState) => string;
 }
@@ -183,9 +186,10 @@ export class SolidStore {
       await this.writeFile(board, id, file);
     }
 
-    // 2. Byte-exact scene body. We serialise with `type: "database"`, which strips the
-    //    inline `files` map (they are sibling resources now) — so the canvas JSON is
-    //    the opaque, byte-exact blob the editor reads back via `restore`.
+    // 2. Byte-exact scene body. The app serialises with `type: "local"` — the
+    //    self-contained `.excalidraw` JSON the editor reads back via its normal import
+    //    path. The store keeps it byte-for-byte (opaque); the sibling blobs above are
+    //    additional WAC-able resources, not required for fidelity.
     const body = this.serialize(state);
     const sceneUrl = this.sceneUrl(board);
     await this.putBody(sceneUrl, body, EXCALIDRAW_MIME);

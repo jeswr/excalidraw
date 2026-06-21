@@ -54,7 +54,8 @@ let pending: SceneState | null = null;
  * teardown when no pod is connected.
  *
  * The serialiser is injected so this module does not pull in Excalidraw's whole
- * `data/json` graph; the app passes the real `serializeAsJSON(…, "database")`.
+ * `data/json` graph; the app passes the real `serializeAsJSON(…, "local")` — the
+ * byte-exact, self-contained `.excalidraw` JSON.
  */
 export function wirePodStore(serialize: (state: SceneState) => string): void {
   const container = drawingsContainer();

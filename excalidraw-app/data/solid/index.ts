@@ -22,19 +22,34 @@ export {
   wirePodStore,
 } from "./controller";
 export {
+  callbackUri,
   clientIdDocumentUrl,
   connectSolid,
   disconnectSolid,
+  dpopAuthedFetch,
   drawingsContainer,
   DRAWINGS_NAMESPACE,
+  interactiveLogin,
   persistedSolidWebId,
   resolveOidcIssuer,
   resolveStorageRoot,
+  setSolidFetch,
   silentRestore,
   solidConnected,
   solidFetch,
   solidWebId,
 } from "./session";
+export {
+  adoptConnectedSession,
+  bootstrapSolid,
+  connectSolidPod,
+  disconnectSolidPod,
+} from "./lifecycle";
+export type {
+  HydrateScene,
+  SceneSerializer,
+  SolidLifecycleOptions,
+} from "./lifecycle";
 export {
   buildClientIdDocument,
   DRAWING_SCENE_SHAPE,

@@ -129,6 +129,13 @@ import {
   localStorageQuotaExceededAtom,
 } from "./data/LocalData";
 import { isBrowserStorageStateNewer } from "./data/tabSync";
+import {
+  bootstrapSolid,
+  connectSolidPod,
+  disconnectSolidPod,
+  persistedSolidWebId,
+} from "./data/solid";
+import { solidLifecycleOptions } from "./data/solid/app-integration";
 import { ShareDialog, shareDialogStateAtom } from "./share/ShareDialog";
 import CollabError, { collabErrorIndicatorAtom } from "./collab/CollabError";
 import { useHandleAppTheme } from "./useHandleAppTheme";
@@ -375,6 +382,9 @@ const ExcalidrawWrapper = () => {
 
   const [errorMessage, setErrorMessage] = useState("");
   const isCollabDisabled = isRunningInIframe();
+
+  // Solid pod connection state (the connected WebID, or null when on the local path).
+  const [solidWebId, setSolidWebId] = useState<string | null>(null);
 
   const { editorTheme, appTheme, setAppTheme } = useHandleAppTheme();
 
@@ -673,6 +683,63 @@ const ExcalidrawWrapper = () => {
       window.removeEventListener(EVENT.BEFORE_UNLOAD, unloadHandler);
     };
   }, [excalidrawAPI]);
+
+  // ---------------------------------------------------------------------------
+  // Solid pod persistence — ACTIVATE the integration.
+  //
+  // On load: attempt a SILENT session restore (refresh-grant, NO popup). On success the
+  // lifecycle wires the pod store with the real `serializeAsJSON(…, "local")` serializer +
+  // the restored authed fetch (so `LocalData.save`'s `savePodScene` actually persists) and
+  // hydrates the canvas from the pod. On no/failed restore the app stays on the local
+  // localStorage/IndexedDB path (Solid is additive, never auto-popups).
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    if (!excalidrawAPI) {
+      return;
+    }
+    let cancelled = false;
+    void bootstrapSolid(solidLifecycleOptions(excalidrawAPI)).then((webId) => {
+      if (!cancelled) {
+        setSolidWebId(webId);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [excalidrawAPI]);
+
+  /**
+   * The explicit "Connect Solid pod" affordance — the ONLY popup/redirect path (an
+   * explicit user action). Interactive login, then wire + hydrate from the pod. A cancelled
+   * login leaves the app on the local path.
+   */
+  const onConnectSolid = useCallback(async () => {
+    if (!excalidrawAPI) {
+      return;
+    }
+    try {
+      const webId = await connectSolidPod(
+        solidLifecycleOptions(excalidrawAPI),
+        persistedSolidWebId() ?? undefined,
+      );
+      setSolidWebId(webId);
+    } catch (err) {
+      // User cancelled or login failed — stay on the local path, surface nothing intrusive.
+      if (
+        !(err instanceof DOMException && err.name === "AbortError") &&
+        isDevEnv()
+      ) {
+        // eslint-disable-next-line no-console
+        console.warn("[solid] connect failed:", err);
+      }
+    }
+  }, [excalidrawAPI]);
+
+  /** Explicit disconnect: stop pod persistence, fall back to the local path. */
+  const onDisconnectSolid = useCallback(() => {
+    disconnectSolidPod();
+    setSolidWebId(null);
+  }, []);
 
   const onChange = (
     elements: readonly OrderedExcalidrawElement[],
@@ -989,6 +1056,9 @@ const ExcalidrawWrapper = () => {
           isCollabEnabled={!isCollabDisabled}
           theme={appTheme}
           refresh={() => forceRefresh((prev) => !prev)}
+          solidWebId={solidWebId}
+          onConnectSolid={onConnectSolid}
+          onDisconnectSolid={onDisconnectSolid}
         />
         <AppWelcomeScreen
           onCollabDialogOpen={onCollabDialogOpen}
