@@ -49,6 +49,21 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let pending: SceneState | null = null;
 
 /**
+ * The single in-flight pod write, plus the snapshot it is saving. Used to COALESCE
+ * concurrent flushes (round-5 Medium fix): the page-teardown handlers (blur /
+ * visibilitychange / pagehide / beforeunload) can each fire a synchronous
+ * `flushPodScene({ keepalive: true })` for the SAME pending snapshot. The browser caps
+ * the TOTAL in-flight `keepalive` request-body size at ~64 KiB AGGREGATE across all
+ * in-flight bodies, so issuing a duplicate keepalive PUT for the same snapshot can push
+ * the aggregate past the cap and reject the request — reintroducing unload-time save
+ * loss. We therefore keep at most ONE in-flight save per snapshot: a flush (or debounced
+ * write) for a snapshot that is already being saved REUSES the existing promise instead
+ * of starting a second `saveScene`. Cleared on settle (success OR failure) so a later
+ * flush of the SAME snapshot (e.g. a retry after a failed write) can start fresh.
+ */
+let inFlight: { state: SceneState; promise: Promise<void> } | null = null;
+
+/**
  * Wire (or re-wire) the controller to the live pod session. Call after a successful
  * login / silent restore (the session module has set the WebID + container). A no-op +
  * teardown when no pod is connected.
@@ -80,6 +95,10 @@ export function teardownPodStore(): void {
     saveTimer = null;
   }
   pending = null;
+  // Drop the in-flight slot too: a save already started against the old store may still
+  // resolve, but it must not coalesce a save for a NEW store wired after teardown. (Its
+  // own `.finally` no-ops because `inFlight` will no longer be its entry.)
+  inFlight = null;
 }
 
 /** True when a pod store is wired and a session is connected. */
@@ -121,20 +140,10 @@ export function savePodScene(
     if (!state || !s) {
       return;
     }
-    // Don't clear `pending` until the write RESOLVES — if it rejects, the state must
-    // survive for the next debounce / flush rather than being silently dropped.
-    void s.saveScene(DEFAULT_BOARD, state).then(
-      () => {
-        clearPendingIfUnchanged(state);
-      },
-      (err) => {
-        // eslint-disable-next-line no-console
-        console.warn(
-          "[solid] pod scene save failed (non-fatal, kept for retry):",
-          err instanceof Error ? err.message : err,
-        );
-      },
-    );
+    // Route through the shared in-flight dedup: if this exact snapshot is already being
+    // saved (e.g. by an unload-time flush), reuse that write rather than firing a second
+    // one. `pending` is cleared only on the write's success (round-4 durability).
+    void startSave(state, s, false);
   }, POD_SAVE_DEBOUNCE);
 }
 
@@ -148,6 +157,54 @@ function clearPendingIfUnchanged(persisted: SceneState): void {
   if (pending === persisted) {
     pending = null;
   }
+}
+
+/**
+ * Start (or REUSE) a single in-flight save for a snapshot — the in-flight dedup that the
+ * debounced write and every unload-time flush share. If a save for THIS exact snapshot is
+ * already in flight, its promise is returned and NO second `saveScene` is issued (so the
+ * aggregate keepalive body cap can't be blown by duplicate unload PUTs of one snapshot,
+ * and a debounced write + an unload flush of the same snapshot don't double-fire). Only
+ * starts a new `saveScene` when nothing is in flight for `state`.
+ *
+ * On the write's SUCCESS the pending snapshot is cleared (round-4 durability — only on a
+ * resolved write, and only if a newer edit hasn't superseded it). On FAILURE the pending
+ * snapshot is KEPT for retry. Either way `inFlight` is cleared on settle so a later flush
+ * of the same (still-pending) snapshot can retry it.
+ */
+function startSave(
+  state: SceneState,
+  s: SolidStore,
+  keepalive: boolean,
+): Promise<void> {
+  // Coalesce: a save for THIS exact snapshot is already running — reuse it (identity match).
+  if (inFlight && inFlight.state === state) {
+    return inFlight.promise;
+  }
+  const promise = s.saveScene(DEFAULT_BOARD, state, { keepalive }).then(
+    () => {
+      clearPendingIfUnchanged(state);
+    },
+    (err) => {
+      // The write didn't resolve: KEEP `pending` so the save is retried (durability).
+      // eslint-disable-next-line no-console
+      console.warn(
+        "[solid] pod scene save failed (non-fatal, kept for retry):",
+        err instanceof Error ? err.message : err,
+      );
+    },
+  );
+  const entry = { state, promise };
+  inFlight = entry;
+  // Clear the in-flight slot on settle (success OR failure) so a later flush of the same
+  // still-pending snapshot can start a fresh save — but only if THIS save is still the
+  // current in-flight one (a newer save for a different snapshot must not be wiped).
+  void promise.finally(() => {
+    if (inFlight === entry) {
+      inFlight = null;
+    }
+  });
+  return promise;
 }
 
 /**
@@ -180,18 +237,15 @@ export async function flushPodScene(opts?: {
   if (!state || !s) {
     return;
   }
-  try {
-    await s.saveScene(DEFAULT_BOARD, state, { keepalive: opts?.keepalive });
-    // Clear ONLY after the write resolved — and only if no newer edit superseded it.
-    clearPendingIfUnchanged(state);
-  } catch (err) {
-    // The write didn't resolve: KEEP `pending` so the save is retried (durability), not lost.
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[solid] pod scene flush failed (non-fatal, kept for retry):",
-      err instanceof Error ? err.message : err,
-    );
-  }
+  // COALESCE concurrent flushes (round-5 Medium fix): the multiple unload handlers
+  // (blur / visibilitychange / pagehide / beforeunload) each call this synchronously for
+  // the SAME pending snapshot. `startSave` reuses a save already in flight for that
+  // snapshot instead of issuing a second `saveScene`, so at most ONE keepalive PUT per
+  // snapshot is in flight — the aggregate keepalive body cap can't be blown by duplicates.
+  // `startSave` never rejects (it logs + keeps `pending` for retry on failure), so the
+  // unload handler stays fail-soft without a local try/catch. The pending snapshot is
+  // cleared only on the write's success (round-4 durability).
+  await startSave(state, s, opts?.keepalive === true);
 }
 
 /**

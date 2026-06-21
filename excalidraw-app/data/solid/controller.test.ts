@@ -367,6 +367,140 @@ describe("pending durability (clear only on a resolved write)", () => {
     expect(hasPendingPodScene()).toBe(true);
   });
 
+  // --- ROUND-5 Medium: in-flight flush DEDUP (coalesce concurrent flushes) --------------
+  //
+  // The page-teardown handlers (blur / visibilitychange / pagehide / beforeunload) each
+  // fire a synchronous `flushPodScene({ keepalive: true })` for the SAME pending snapshot.
+  // The browser caps the AGGREGATE in-flight `keepalive` body size at ~64 KiB across ALL
+  // in-flight bodies, so a duplicate keepalive PUT for one snapshot can blow the cap and
+  // reject — losing the save. These pin: concurrent flushes coalesce to ONE PUT; success
+  // clears pending; failure keeps pending and a later flush retries with a new PUT.
+
+  // A scene-PUT mock whose writes hang on a gate, so several flushes overlap in-flight.
+  // Returns { release, count(), reached } — `reached` resolves the FIRST time a scene-body
+  // PUT is entered (so a test can deterministically wait until the in-flight write exists
+  // before asserting the coalesced count, without sleeping a fixed number of microticks).
+  const gatedScenePut = () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let signalReached!: () => void;
+    const reached = new Promise<void>((r) => {
+      signalReached = r;
+    });
+    let count = 0;
+    sessionFetch().mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (
+          (url as string).endsWith(`${DEFAULT_BOARD}.excalidraw`) &&
+          init?.method === "PUT"
+        ) {
+          count += 1;
+          signalReached(); // a scene PUT has begun (resolving `reached` is idempotent)
+          await gate; // hold the scene body PUT in-flight until released
+          return new Response(null, { status: 201 });
+        }
+        return new Response(null, { status: 201 });
+      },
+    );
+    return { release, count: () => count, reached };
+  };
+
+  const countScenePuts = () => {
+    const calls = sessionFetch().mock.calls as unknown as [
+      string,
+      RequestInit?,
+    ][];
+    return calls.filter(
+      ([url, init]) =>
+        url.endsWith(`${DEFAULT_BOARD}.excalidraw`) && init?.method === "PUT",
+    ).length;
+  };
+
+  it("coalesces concurrent keepalive flushes of ONE snapshot into a SINGLE PUT", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const { release, count, reached } = gatedScenePut();
+
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    // Simulate the multiple unload handlers all firing synchronously while the first
+    // write is still UNRESOLVED — they must NOT each start a new saveScene/PUT. (The
+    // f2..f4 calls run synchronously to their `await startSave(...)`, where startSave
+    // returns the SAME in-flight promise instead of issuing a second saveScene.)
+    const f1 = flushPodScene({ keepalive: true });
+    const f2 = flushPodScene({ keepalive: true });
+    const f3 = flushPodScene({ keepalive: true });
+    const f4 = flushPodScene({ keepalive: true });
+
+    // Wait until the (single) scene PUT is actually in flight (gated) — exactly ONE issued.
+    await reached;
+    expect(count()).toBe(1);
+
+    release();
+    await Promise.all([f1, f2, f3, f4]);
+    // Still exactly one scene PUT total, and on its success pending is cleared.
+    expect(countScenePuts()).toBe(1);
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("does NOT coalesce after the in-flight write SETTLES — a later flush retries (new PUT)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    // First scene PUT FAILS → pending survives, in-flight slot cleared on settle.
+    let failNext = true;
+    sessionFetch().mockImplementation(
+      async (url: string, init?: RequestInit) => {
+        if (
+          (url as string).endsWith(`${DEFAULT_BOARD}.excalidraw`) &&
+          init?.method === "PUT"
+        ) {
+          if (failNext) {
+            failNext = false;
+            return new Response("boom", { status: 500 });
+          }
+          return new Response(null, { status: 201 });
+        }
+        return new Response(null, { status: 201 });
+      },
+    );
+
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    await flushPodScene({ keepalive: true }); // attempt #1 fails → pending kept
+    expect(hasPendingPodScene()).toBe(true);
+    expect(countScenePuts()).toBe(1);
+
+    // A SUBSEQUENT flush of the still-pending snapshot is NOT coalesced into the
+    // (settled) first one — it issues a fresh PUT, which succeeds and clears pending.
+    await flushPodScene({ keepalive: true });
+    expect(countScenePuts()).toBe(2);
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("a debounced write and an unload flush of the SAME snapshot do not double-fire", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const { release, count, reached } = gatedScenePut();
+
+    // The debounce timer fires FIRST, starting an in-flight save (gated, not yet resolved,
+    // so `pending` is still held for THIS snapshot)…
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    vi.advanceTimersByTime(2100); // fire the debounce → startSave runs (scene PUT gated)
+    await reached;
+    expect(count()).toBe(1);
+
+    // …then an unload flush arrives for the SAME (still-pending) snapshot — it must
+    // coalesce onto the in-flight save, not issue a second PUT.
+    const flushed = flushPodScene({ keepalive: true });
+    await Promise.resolve();
+    expect(count()).toBe(1);
+
+    release();
+    await flushed;
+    expect(countScenePuts()).toBe(1);
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
   it("a late-resolving older save does NOT clobber a NEWER pending edit", async () => {
     setSession(true, CONTAINER, WEBID);
     wirePodStore(serialize);
