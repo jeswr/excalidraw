@@ -1,0 +1,23 @@
+<!doctype html>
+<!-- AUTHORED-BY Claude Opus 4.8 (Fable unavailable) — re-review/upgrade candidate. -->
+<!--
+  Solid-OIDC authorization-code callback for the Excalidraw→Solid fork.
+  @solid/reactive-authentication opens the IdP login in a popup whose redirect_uri is
+  this page; on return it posts the full callback URL (with the ?code=…) back to the
+  opener, which completes the token exchange. This page is listed in clientid.jsonld's
+  redirect_uris.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Signing in…</title>
+  </head>
+  <body>
+    <p>Completing sign-in…</p>
+    <script>
+      if (window.opener) {
+        window.opener.postMessage(location.href);
+      }
+    </script>
+  </body>
+</html>

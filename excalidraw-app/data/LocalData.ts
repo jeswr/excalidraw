@@ -44,6 +44,7 @@ import { SAVE_TO_LOCAL_STORAGE_TIMEOUT, STORAGE_KEYS } from "../app_constants";
 import { FileManager } from "./FileManager";
 import { FileStatusStore } from "./fileStatusStore";
 import { Locker } from "./Locker";
+import { savePodScene } from "./solid/controller";
 import { updateBrowserStateVersion } from "./tabSync";
 
 const filesStore = createStore("files-db", "files-store");
@@ -123,6 +124,12 @@ export class LocalData {
       onFilesSaved: () => void,
     ) => {
       saveDataStateToLocalStorage(elements, appState);
+
+      // Solid integration: mirror the scene to the user's pod when a pod session is
+      // connected (a debounced, fail-soft no-op otherwise). localStorage stays the
+      // instant cache; the pod is the durable, cross-device source of truth. See
+      // `data/solid/` — the byte-exact `.excalidraw` scene + owner-only WAC ACL.
+      savePodScene(elements, appState, files);
 
       await this.fileStorage.saveFiles({
         elements,

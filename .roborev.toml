@@ -1,0 +1,7 @@
+# roborev config for the jeswr/excalidraw fork (Solid pod-persistence integration).
+# Matches the @jeswr suite convention: a non-Anthropic reviewer at low severity, so the
+# Solid integration code (auth / WAC ACL / pod writes) is reviewed by a different model
+# family than the one that wrote it. Scope is the Solid integration subtree — the rest
+# is upstream Excalidraw (MIT), reviewed upstream.
+reviewer = "codex"
+review_min_severity = "low"

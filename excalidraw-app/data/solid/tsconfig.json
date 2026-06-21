@@ -1,0 +1,36 @@
+{
+  "//": "AUTHORED-BY Claude Opus 4.8 — scoped typecheck for the Solid integration modules. The Excalidraw monorepo root tsconfig uses moduleResolution:node, which cannot resolve the @jeswr packages' `exports`-only subpaths; vite/vitest use bundler resolution at runtime, so we typecheck this subtree with `bundler` to match. Run: `npx tsc -p excalidraw-app/data/solid/tsconfig.json`.",
+  "compilerOptions": {
+    "rootDir": "../../..",
+    "target": "ESNext",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "types": ["vitest/globals", "node"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "baseUrl": "../../..",
+    "paths": {
+      "@excalidraw/common": ["./packages/common/src/index.ts"],
+      "@excalidraw/common/*": ["./packages/common/src/*"],
+      "@excalidraw/excalidraw": ["./packages/excalidraw/index.tsx"],
+      "@excalidraw/excalidraw/*": ["./packages/excalidraw/*"],
+      "@excalidraw/element": ["./packages/element/src/index.ts"],
+      "@excalidraw/element/*": ["./packages/element/src/*"],
+      "@excalidraw/math": ["./packages/math/src/index.ts"],
+      "@excalidraw/math/*": ["./packages/math/src/*"],
+      "@excalidraw/utils": ["./packages/utils/src/index.ts"],
+      "@excalidraw/utils/*": ["./packages/utils/src/*"]
+    }
+  },
+  "include": ["./**/*.ts"],
+  "exclude": ["./**/*.test.ts", "./generate-federation-artifacts.mjs"]
+}
