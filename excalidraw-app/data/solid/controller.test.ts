@@ -418,6 +418,31 @@ describe("pending durability (clear only on a resolved write)", () => {
     ).length;
   };
 
+  // Flush microtasks (without advancing fake timers) until at least `n` scene-body PUTs
+  // have been ISSUED into the (possibly gated) fetch mock, or a bounded number of ticks
+  // elapse. Deterministic alternative to a fixed `await Promise.resolve()` count when a
+  // PUT is several `await` hops deep (memoised ACL + the body PUT) inside `saveScene`.
+  const waitForScenePuts = async (n: number): Promise<void> => {
+    for (let i = 0; i < 50 && countScenePuts() < n; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await Promise.resolve();
+    }
+  };
+
+  // The keepalive flags of every issued scene-body PUT, in call order (round-6 helper).
+  const scenePutKeepaliveFlags = (): (boolean | undefined)[] => {
+    const calls = sessionFetch().mock.calls as unknown as [
+      string,
+      RequestInit?,
+    ][];
+    return calls
+      .filter(
+        ([url, init]) =>
+          url.endsWith(`${DEFAULT_BOARD}.excalidraw`) && init?.method === "PUT",
+      )
+      .map(([, init]) => init?.keepalive);
+  };
+
   it("coalesces concurrent keepalive flushes of ONE snapshot into a SINGLE PUT", async () => {
     setSession(true, CONTAINER, WEBID);
     wirePodStore(serialize);
@@ -477,27 +502,128 @@ describe("pending durability (clear only on a resolved write)", () => {
     expect(hasPendingPodScene()).toBe(false);
   });
 
-  it("a debounced write and an unload flush of the SAME snapshot do not double-fire", async () => {
+  it("a keepalive unload flush overlapping a debounced NON-keepalive save issues its OWN keepalive PUT, and a further keepalive flush then coalesces", async () => {
+    // ROUND-6 correction of the original round-5 invariant: a keepalive flush must NOT
+    // coalesce onto a NON-keepalive in-flight debounce (that request can be cancelled on
+    // teardown). It starts its OWN keepalive PUT — and, once that keepalive save is the
+    // tracked in-flight one, a FURTHER concurrent keepalive flush coalesces onto IT (so we
+    // still don't fire duplicate keepalive PUTs that could blow the aggregate cap).
     setSession(true, CONTAINER, WEBID);
     wirePodStore(serialize);
     const { release, count, reached } = gatedScenePut();
 
-    // The debounce timer fires FIRST, starting an in-flight save (gated, not yet resolved,
-    // so `pending` is still held for THIS snapshot)…
+    // The debounce timer fires FIRST, starting an in-flight NON-keepalive save (gated, not
+    // yet resolved, so `pending` is still held for THIS snapshot)…
     savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
-    vi.advanceTimersByTime(2100); // fire the debounce → startSave runs (scene PUT gated)
+    vi.advanceTimersByTime(2100); // fire the debounce → startSave(state, store, false)
     await reached;
     expect(count()).toBe(1);
 
-    // …then an unload flush arrives for the SAME (still-pending) snapshot — it must
-    // coalesce onto the in-flight save, not issue a second PUT.
+    // …then an unload (keepalive) flush of the SAME snapshot arrives. It must NOT coalesce
+    // onto the cancellable non-keepalive write — it issues its OWN keepalive PUT.
     const flushed = flushPodScene({ keepalive: true });
+    await waitForScenePuts(2); // the keepalive PUT is issued into the (still-gated) mock
+    expect(count()).toBe(2);
+
+    // A SECOND keepalive flush now coalesces onto the (keepalive) tracked in-flight save —
+    // no third PUT.
+    const flushed2 = flushPodScene({ keepalive: true });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(count()).toBe(2);
+
+    release();
+    await Promise.all([flushed, flushed2]);
+    // Two PUTs total (the debounce + the single keepalive unload); pending cleared.
+    expect(countScenePuts()).toBe(2);
+    expect(scenePutKeepaliveFlags()).toContain(true);
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  // --- ROUND-6 High: KEEPALIVE-AWARE coalescing -----------------------------------------
+  //
+  // Round-5's dedup coalesced a keepalive unload flush onto ANY in-flight save for the same
+  // snapshot — INCLUDING a debounced NON-keepalive write. A non-keepalive request can be
+  // CANCELLED during page teardown, so coalescing the unload onto it meant NO keepalive PUT
+  // was issued → the latest scene was LOST when an unload overlapped a debounced save. The
+  // fix: a keepalive flush coalesces ONLY onto a keepalive in-flight save; overlapping a
+  // non-keepalive in-flight write, it starts its OWN keepalive PUT. (The round-5 invariant —
+  // concurrent KEEPALIVE flushes still collapse to one — is preserved.)
+
+  it("issues a KEEPALIVE PUT when an unload flush overlaps a debounced NON-keepalive save (not coalesced away)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const { release, count, reached } = gatedScenePut();
+
+    // A DEBOUNCED (non-keepalive) write fires FIRST and is in flight (gated, unresolved) —
+    // `pending` is still held for THIS snapshot.
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    vi.advanceTimersByTime(2100); // fire the debounce → startSave(state, store, false)
+    await reached;
+    expect(count()).toBe(1);
+    // The in-flight save is NON-keepalive.
+    expect(scenePutKeepaliveFlags()).toEqual([undefined]);
+
+    // …then an unload flush (keepalive) of the SAME snapshot arrives. It must NOT coalesce
+    // onto the cancellable non-keepalive write — it must issue its OWN keepalive PUT so the
+    // unload save survives page teardown.
+    const flushed = flushPodScene({ keepalive: true });
+    await waitForScenePuts(2); // the keepalive PUT is issued into the (still-gated) mock
+    expect(count()).toBe(2);
+    // A keepalive PUT IS present (the unload save is guaranteed), alongside the debounce's.
+    expect(scenePutKeepaliveFlags()).toContain(true);
+
+    release();
+    await flushed;
+    // Two PUTs total: the non-keepalive debounce + the keepalive unload. Both resolve;
+    // pending is cleared on success.
+    expect(countScenePuts()).toBe(2);
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("ROUND-5 invariant preserved: two concurrent KEEPALIVE flushes still coalesce to ONE keepalive PUT", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const { release, count, reached } = gatedScenePut();
+
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    // Both flushes are keepalive for the SAME snapshot → coalesce to a single keepalive PUT.
+    const f1 = flushPodScene({ keepalive: true });
+    const f2 = flushPodScene({ keepalive: true });
+
+    await reached;
+    expect(count()).toBe(1);
+    expect(scenePutKeepaliveFlags()).toEqual([true]);
+
+    release();
+    await Promise.all([f1, f2]);
+    expect(countScenePuts()).toBe(1);
+    expect(hasPendingPodScene()).toBe(false);
+  });
+
+  it("a NON-keepalive flush coalesces onto an in-flight NON-keepalive debounce (no duplicate PUT)", async () => {
+    setSession(true, CONTAINER, WEBID);
+    wirePodStore(serialize);
+    const { release, count, reached } = gatedScenePut();
+
+    // A DEBOUNCED (non-keepalive) write fires and is in flight (gated, unresolved)…
+    savePodScene([el()], { viewBackgroundColor: "#abc" }, {});
+    vi.advanceTimersByTime(2100);
+    await reached;
+    expect(count()).toBe(1);
+
+    // …then a plain (non-keepalive) flush of the SAME pending snapshot arrives. A
+    // non-keepalive save coalesces onto an in-flight save of EITHER flavour, so it must
+    // NOT issue a second PUT (a non-keepalive flush has no teardown-cancellation risk).
+    const flushed = flushPodScene();
+    await Promise.resolve();
     await Promise.resolve();
     expect(count()).toBe(1);
 
     release();
     await flushed;
     expect(countScenePuts()).toBe(1);
+    expect(scenePutKeepaliveFlags()).toEqual([undefined]);
     expect(hasPendingPodScene()).toBe(false);
   });
 

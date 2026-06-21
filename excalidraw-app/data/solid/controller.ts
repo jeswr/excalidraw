@@ -49,19 +49,41 @@ let saveTimer: ReturnType<typeof setTimeout> | null = null;
 let pending: SceneState | null = null;
 
 /**
- * The single in-flight pod write, plus the snapshot it is saving. Used to COALESCE
- * concurrent flushes (round-5 Medium fix): the page-teardown handlers (blur /
- * visibilitychange / pagehide / beforeunload) can each fire a synchronous
- * `flushPodScene({ keepalive: true })` for the SAME pending snapshot. The browser caps
- * the TOTAL in-flight `keepalive` request-body size at ~64 KiB AGGREGATE across all
- * in-flight bodies, so issuing a duplicate keepalive PUT for the same snapshot can push
- * the aggregate past the cap and reject the request — reintroducing unload-time save
- * loss. We therefore keep at most ONE in-flight save per snapshot: a flush (or debounced
- * write) for a snapshot that is already being saved REUSES the existing promise instead
- * of starting a second `saveScene`. Cleared on settle (success OR failure) so a later
- * flush of the SAME snapshot (e.g. a retry after a failed write) can start fresh.
+ * The single tracked in-flight pod write, the snapshot it is saving, and WHETHER it was
+ * started with `keepalive`. Used to COALESCE concurrent saves — but KEEPALIVE-AWARELY
+ * (round-6 High fix), because two coalescing rules pull in opposite directions:
+ *
+ *   - Round-5 dedup: the page-teardown handlers (blur / visibilitychange / pagehide /
+ *     beforeunload) can each fire a synchronous `flushPodScene({ keepalive: true })` for
+ *     the SAME pending snapshot. The browser caps the TOTAL in-flight `keepalive`
+ *     request-body size at ~64 KiB AGGREGATE, so a DUPLICATE keepalive PUT for one
+ *     snapshot can blow the cap and reject — losing the unload save. So concurrent
+ *     KEEPALIVE flushes of one snapshot must coalesce to a SINGLE keepalive PUT.
+ *
+ *   - Round-6 correction: a keepalive flush must NOT coalesce onto a NON-keepalive
+ *     in-flight save (a debounced write). A non-keepalive request can be CANCELLED during
+ *     page teardown, so coalescing the unload onto it would mean NO keepalive request is
+ *     issued at all → the latest scene is LOST if the page tears down before the
+ *     non-keepalive write completes. When a keepalive flush overlaps a non-keepalive
+ *     in-flight save, the flush must start its OWN keepalive PUT to survive teardown.
+ *
+ * The rules, therefore, are FLAVOUR-AWARE (see {@link startSave}):
+ *   - a KEEPALIVE save coalesces only onto an in-flight save that is ALSO keepalive
+ *     (same snapshot) — else it starts its own keepalive save and becomes the tracked
+ *     in-flight entry;
+ *   - a NON-keepalive save coalesces onto an in-flight save of the same snapshot of
+ *     EITHER flavour (no need to duplicate a write that's already going).
+ *
+ * Two in-flight saves for one snapshot (a non-keepalive debounce + a keepalive unload) is
+ * acceptable: only the keepalive body counts against the keepalive cap, and the
+ * non-keepalive one being cancelled on teardown is fine. Cleared on settle (guarded) so a
+ * later flush of the SAME snapshot (e.g. a retry after a failed write) can start fresh.
  */
-let inFlight: { state: SceneState; promise: Promise<void> } | null = null;
+let inFlight: {
+  state: SceneState;
+  keepalive: boolean;
+  promise: Promise<void>;
+} | null = null;
 
 /**
  * Wire (or re-wire) the controller to the live pod session. Call after a successful
@@ -160,16 +182,23 @@ function clearPendingIfUnchanged(persisted: SceneState): void {
 }
 
 /**
- * Start (or REUSE) a single in-flight save for a snapshot — the in-flight dedup that the
- * debounced write and every unload-time flush share. If a save for THIS exact snapshot is
- * already in flight, its promise is returned and NO second `saveScene` is issued (so the
- * aggregate keepalive body cap can't be blown by duplicate unload PUTs of one snapshot,
- * and a debounced write + an unload flush of the same snapshot don't double-fire). Only
- * starts a new `saveScene` when nothing is in flight for `state`.
+ * Start (or REUSE) an in-flight save for a snapshot — KEEPALIVE-AWARE coalescing (round-6
+ * High fix). Coalescing depends on the flavour of BOTH the requested save and the tracked
+ * in-flight one:
+ *
+ *   - A NON-keepalive save (a debounced write) coalesces onto any in-flight save for the
+ *     SAME snapshot (either flavour) — no point duplicating a write that's already going.
+ *   - A KEEPALIVE save (an unload flush) coalesces ONLY onto an in-flight save that is
+ *     ALSO keepalive (same snapshot) — so concurrent unload flushes collapse to a SINGLE
+ *     keepalive PUT (round-5: the aggregate keepalive body cap can't be blown by
+ *     duplicates). It must NOT coalesce onto a NON-keepalive in-flight save: that
+ *     debounced request can be CANCELLED on page teardown, so the unload needs its OWN
+ *     keepalive PUT to survive. When it starts its own keepalive save, it becomes the
+ *     tracked `inFlight` (so further unload flushes coalesce onto the keepalive one).
  *
  * On the write's SUCCESS the pending snapshot is cleared (round-4 durability — only on a
  * resolved write, and only if a newer edit hasn't superseded it). On FAILURE the pending
- * snapshot is KEPT for retry. Either way `inFlight` is cleared on settle so a later flush
+ * snapshot is KEPT for retry. `inFlight` is cleared on settle (guarded) so a later flush
  * of the same (still-pending) snapshot can retry it.
  */
 function startSave(
@@ -177,8 +206,15 @@ function startSave(
   s: SolidStore,
   keepalive: boolean,
 ): Promise<void> {
-  // Coalesce: a save for THIS exact snapshot is already running — reuse it (identity match).
-  if (inFlight && inFlight.state === state) {
+  // Coalesce only when the in-flight save is for THIS exact snapshot (identity match) AND
+  // its flavour SATISFIES this request: a keepalive flush is satisfied only by a keepalive
+  // in-flight save (a non-keepalive one may be cancelled on teardown → no keepalive PUT
+  // would be issued); a non-keepalive write is satisfied by either flavour.
+  if (
+    inFlight &&
+    inFlight.state === state &&
+    (!keepalive || inFlight.keepalive)
+  ) {
     return inFlight.promise;
   }
   const promise = s.saveScene(DEFAULT_BOARD, state, { keepalive }).then(
@@ -194,11 +230,16 @@ function startSave(
       );
     },
   );
-  const entry = { state, promise };
+  const entry = { state, keepalive, promise };
+  // Make THIS save the tracked in-flight one. A keepalive save started because the
+  // in-flight one was non-keepalive thereby replaces it as the tracked entry, so the next
+  // concurrent unload flush coalesces onto the keepalive PUT (not the cancellable
+  // non-keepalive one). The displaced non-keepalive save's own `.finally` guard no-ops
+  // (its `entry` is no longer the current `inFlight`), so it never wrongly clears the slot.
   inFlight = entry;
   // Clear the in-flight slot on settle (success OR failure) so a later flush of the same
   // still-pending snapshot can start a fresh save — but only if THIS save is still the
-  // current in-flight one (a newer save for a different snapshot must not be wiped).
+  // current in-flight one (a newer save for a different snapshot/flavour must not be wiped).
   void promise.finally(() => {
     if (inFlight === entry) {
       inFlight = null;
@@ -237,14 +278,17 @@ export async function flushPodScene(opts?: {
   if (!state || !s) {
     return;
   }
-  // COALESCE concurrent flushes (round-5 Medium fix): the multiple unload handlers
-  // (blur / visibilitychange / pagehide / beforeunload) each call this synchronously for
-  // the SAME pending snapshot. `startSave` reuses a save already in flight for that
-  // snapshot instead of issuing a second `saveScene`, so at most ONE keepalive PUT per
-  // snapshot is in flight — the aggregate keepalive body cap can't be blown by duplicates.
-  // `startSave` never rejects (it logs + keeps `pending` for retry on failure), so the
-  // unload handler stays fail-soft without a local try/catch. The pending snapshot is
-  // cleared only on the write's success (round-4 durability).
+  // COALESCE concurrent flushes — KEEPALIVE-AWARELY (round-5 dedup + round-6 High fix):
+  // the multiple unload handlers (blur / visibilitychange / pagehide / beforeunload) each
+  // call this synchronously for the SAME pending snapshot. `startSave` collapses concurrent
+  // KEEPALIVE flushes of one snapshot to a SINGLE keepalive PUT (so the aggregate keepalive
+  // body cap can't be blown by duplicates) — BUT it does NOT coalesce a keepalive flush
+  // onto a NON-keepalive in-flight save (a debounced write): that request can be cancelled
+  // on teardown, so a keepalive flush overlapping a debounced write starts its OWN keepalive
+  // PUT to guarantee the unload save survives. `startSave` never rejects (it logs + keeps
+  // `pending` for retry on failure), so the unload handler stays fail-soft without a local
+  // try/catch. The pending snapshot is cleared only on the write's success (round-4
+  // durability).
   await startSave(state, s, opts?.keepalive === true);
 }
 
