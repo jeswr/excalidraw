@@ -1,0 +1,31 @@
+# Dependabot version-update configuration.
+#
+# Only the actually-SHIPPED dependency tree is configured here: the root npm
+# workspace (excalidraw-app, packages/*, examples/with-script-in-browser —
+# all resolved through the single root yarn.lock) and the repo's GitHub
+# Actions workflows.
+#
+# DELIBERATELY NOT configured: dev-docs/ (a standalone Docusaurus site with
+# its own package.json + yarn.lock) and examples/with-nextjs (its own
+# package.json + yarn.lock, listed in the root workspaces glob but resolved
+# independently — see its committed yarn.lock). Both are non-shipped
+# upstream excalidraw/excalidraw artifact trees carried by this fork purely
+# to avoid merge conflicts on future upstream syncs. Do not add directory
+# entries for dev-docs/ or examples/with-nextjs without re-opening that
+# decision (see the fix/dependabot-silence-nonshipped commit + the dismissed
+# alerts on those manifests). Their existing/future Dependabot security
+# alerts are additionally suppressed via .gitattributes dependency-graph
+# vendoring (linguist-vendored=true) — see that file.
+version: 2
+
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

@@ -1,1 +1,10 @@
 * text=auto eol=lf
+
+# Non-shipped upstream excalidraw/excalidraw artifact trees kept only to
+# avoid merge conflicts on future upstream syncs (see .github/dependabot.yml
+# and the fix/dependabot-silence-nonshipped commit). Marking them vendored
+# excludes their manifests/lockfiles from GitHub's dependency graph, which
+# stops new Dependabot security alerts from being generated against them.
+dev-docs/** linguist-vendored=true
+examples/with-nextjs/** linguist-vendored=true
+examples/with-script-in-browser/** linguist-vendored=true
