@@ -223,7 +223,9 @@ export default defineConfig(({ mode }) => {
               },
             },
           ],
-          maximumFileSizeToCacheInBytes: 2.3 * 1024 ** 2, // 2.3MB
+          // 3MB: the fork's main chunk (Solid pod layer + upstream laser-pointer
+          // + security-patched deps) sits just above upstream's 2.3MB cap
+          maximumFileSizeToCacheInBytes: 3 * 1024 ** 2, // 3MB
         },
         manifest: {
           short_name: "Excalidraw",
