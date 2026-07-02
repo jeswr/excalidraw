@@ -29,3 +29,11 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+# ACCEPTED RESIDUAL (roborev job on 71d4798, Medium): examples/with-script-in-browser
+# has no lockfile of its own — its deps resolve through the SHIPPED root yarn.lock,
+# and dependabot.yml cannot exclude one workspace's contribution to the root
+# resolution. Root-lock alerts caused solely by that example therefore still
+# surface as root alerts. This errs toward EXTRA visibility (never less); the
+# only removal path is dropping examples/ from the root workspaces glob, which
+# was rejected for upstream-merge-conflict cost.
