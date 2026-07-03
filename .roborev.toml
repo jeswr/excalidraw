@@ -3,5 +3,6 @@
 # Solid integration code (auth / WAC ACL / pod writes) is reviewed by a different model
 # family than the one that wrote it. Scope is the Solid integration subtree — the rest
 # is upstream Excalidraw (MIT), reviewed upstream.
-reviewer = "codex"
+agent = "codex"
+model = "gpt-5.5"
 review_min_severity = "low"
