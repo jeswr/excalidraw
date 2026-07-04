@@ -161,9 +161,52 @@ export function clientIdDocumentUrl(): string {
 }
 
 /**
+ * Validate + normalise an UNTRUSTED `pim:storage` object value (read from a WebID
+ * profile — the profile owner, or an attacker who can write to it, fully controls this
+ * string) into a canonical container root: an absolute http(s) URL with no query/fragment
+ * and a path ending in `/`. Returns `null` (never throws) on anything that fails to parse
+ * or isn't a clean container address, so the caller can skip it and fall through to the
+ * origin-root default.
+ *
+ * SECURITY (raw-string `endsWith` bypass fix). The prior implementation did
+ * `root.endsWith("/")` on the RAW string and concatenated it onward unparsed. A hostile
+ * `pim:storage` value such as `https://evil.example/x?y=/` or `https://evil.example/x#/`
+ * ends with `/` as a STRING (the query/fragment does) without the path being a container
+ * at all — `endsWith` never parses the URL to see that. That smuggled query/fragment then
+ * rode onward into the drawings-container concat (`${root}${DRAWINGS_NAMESPACE}`) and
+ * every subsequent pod-resource URL built from it, silently landing requests at whatever
+ * path/resource the query or fragment actually pointed to. Parsing via `new URL()` FIRST
+ * and validating the PARSED `pathname` (never the raw string, and rejecting any
+ * search/hash outright rather than trying to strip-and-salvage them) closes that: a
+ * query/fragment can never masquerade as a directory boundary.
+ */
+function normalizeStorageRoot(value: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return null;
+  }
+  if (url.search !== "" || url.hash !== "") {
+    return null;
+  }
+  const pathname = url.pathname.endsWith("/")
+    ? url.pathname
+    : `${url.pathname}/`;
+  // Reconstructed from the parsed origin + pathname only — never the raw string — so
+  // nothing else that may have ridden along in `value` (userinfo, a stray query/hash
+  // the checks above already reject, etc.) can survive into the returned root.
+  return `${url.origin}${pathname}`;
+}
+
+/**
  * Resolve the pod storage root for a WebID by dereferencing its profile and reading
- * `pim:storage`. Falls back to the WebID origin root when none is advertised. Returns
- * a URL ending in `/`. Uses the injected (authed) fetch so a private profile resolves.
+ * `pim:storage`. Falls back to the WebID origin root when none is advertised, or when
+ * every advertised value fails validation ({@link normalizeStorageRoot}). Returns a URL
+ * ending in `/`. Uses the injected (authed) fetch so a private profile resolves.
  */
 export async function resolveStorageRoot(
   webId: string,
@@ -177,8 +220,12 @@ export async function resolveStorageRoot(
         q.predicate.value === PIM_STORAGE &&
         q.object.termType === "NamedNode"
       ) {
-        const root = q.object.value;
-        return root.endsWith("/") ? root : `${root}/`;
+        const normalized = normalizeStorageRoot(q.object.value);
+        if (normalized) {
+          return normalized;
+        }
+        // malformed/untrusted value — skip it, keep scanning the remaining quads (and
+        // fall through to the origin-root default below if nothing else validates).
       }
     }
   } catch {
@@ -327,7 +374,10 @@ export async function connectSolid(webId: string): Promise<void> {
   const fetchImpl = solidFetch();
   const root = await resolveStorageRoot(webId, fetchImpl);
   currentWebId = webId;
-  currentDrawingsContainer = `${root}${DRAWINGS_NAMESPACE}`;
+  // `root` is already a validated, parsed container root (see resolveStorageRoot /
+  // normalizeStorageRoot) — resolve the sub-container via `new URL()` rather than string
+  // concat so the same defence-in-depth applies here too.
+  currentDrawingsContainer = new URL(DRAWINGS_NAMESPACE, root).toString();
   try {
     globalThis.localStorage?.setItem(SOLID_WEBID_KEY, webId);
   } catch {
