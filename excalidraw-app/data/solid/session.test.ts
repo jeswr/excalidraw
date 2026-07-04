@@ -84,6 +84,84 @@ describe("dpopAuthedFetch — every request is DPoP-authed", () => {
   });
 });
 
+// --- SECURITY: resolveStorageRoot must PARSE `pim:storage`, never raw-string `endsWith` ---
+describe("resolveStorageRoot — raw-string endsWith bypass fix", () => {
+  /** A fake fetch-rdf dataset yielding one `pim:storage` NamedNode quad. */
+  function mockFetchRdfWithStorage(storageValue: string | null) {
+    vi.doMock("@jeswr/fetch-rdf", () => ({
+      fetchRdf: async () => ({
+        dataset: {
+          match: () =>
+            (storageValue === null
+              ? []
+              : [
+                  {
+                    predicate: {
+                      value: "http://www.w3.org/ns/pim/space#storage",
+                    },
+                    object: { termType: "NamedNode", value: storageValue },
+                  },
+                ])[Symbol.iterator](),
+        },
+      }),
+    }));
+  }
+
+  it("a clean container root is returned unchanged", async () => {
+    mockFetchRdfWithStorage("https://alice.pod.example/storage/");
+    vi.resetModules();
+    const { resolveStorageRoot: fn } = await import("./session");
+    const root = await fn(WEBID, globalThis.fetch);
+    expect(root).toBe("https://alice.pod.example/storage/");
+  });
+
+  it("a root missing the trailing slash is normalised to end with '/'", async () => {
+    mockFetchRdfWithStorage("https://alice.pod.example/storage");
+    vi.resetModules();
+    const { resolveStorageRoot: fn } = await import("./session");
+    const root = await fn(WEBID, globalThis.fetch);
+    expect(root).toBe("https://alice.pod.example/storage/");
+  });
+
+  it("a query-smuggled '/' (?q=/) does NOT pass the raw-string endsWith check — falls back to the WebID origin root", async () => {
+    mockFetchRdfWithStorage("https://evil.example/x?q=/");
+    vi.resetModules();
+    const { resolveStorageRoot: fn } = await import("./session");
+    const root = await fn(WEBID, globalThis.fetch);
+    // The malformed value is rejected outright (never trusted, never stripped-and-used);
+    // the caller falls through to the WebID's own origin root.
+    expect(root).toBe("https://alice.pod.example/");
+    expect(root).not.toContain("evil.example");
+    expect(root).not.toContain("?");
+  });
+
+  it("a fragment-smuggled '/' (#/) does NOT pass the raw-string endsWith check — falls back to the WebID origin root", async () => {
+    mockFetchRdfWithStorage("https://evil.example/x#/");
+    vi.resetModules();
+    const { resolveStorageRoot: fn } = await import("./session");
+    const root = await fn(WEBID, globalThis.fetch);
+    expect(root).toBe("https://alice.pod.example/");
+    expect(root).not.toContain("evil.example");
+    expect(root).not.toContain("#");
+  });
+
+  it("an unparseable pim:storage value falls back to the WebID origin root", async () => {
+    mockFetchRdfWithStorage("not a url at all");
+    vi.resetModules();
+    const { resolveStorageRoot: fn } = await import("./session");
+    const root = await fn(WEBID, globalThis.fetch);
+    expect(root).toBe("https://alice.pod.example/");
+  });
+
+  it("no pim:storage advertised falls back to the WebID origin root", async () => {
+    mockFetchRdfWithStorage(null);
+    vi.resetModules();
+    const { resolveStorageRoot: fn } = await import("./session");
+    const root = await fn(WEBID, globalThis.fetch);
+    expect(root).toBe("https://alice.pod.example/");
+  });
+});
+
 describe("silentRestore — installs the authed fetch + connects (the fix)", () => {
   it("on a restored credential: installs a DPoP-authed fetch and connects", async () => {
     const dpopKey = await makeDpopKey();
