@@ -51,10 +51,11 @@ These are load-bearing — see the module TSDoc for the full contract.
 
 - **Sector:** `https://w3id.org/jeswr/sectors/drawing#sector`
 - **Produces / consumes shape:** `https://w3id.org/jeswr/drawing#Scene`
-- **`client_id` (canonical prod):** `https://excalidraw.jeswr.org/clientid.jsonld`
-- **Membership:** `public/federation/registry.ttl` — a `fedreg:Membership(status:Active)`.
-
-> **NEEDS:USER** — `fedreg:assertedBy` is a flagged placeholder (`https://jeswr.solidcommunity.net/profile/card#me`). Replace it with the maintainer / registry-operator WebID and re-issue the membership before the registry goes live.
+- **`client_id` (LIVE prod):** `https://excalidraw-solid.vercel.app/clientid.jsonld` (Vercel
+  go-live 2026-07-06; `excalidraw.jeswr.org` is the eventual custom domain — regenerate the
+  artifacts when it lands)
+- **Membership:** `public/federation/registry.ttl` — a `fedreg:Membership(status:Active)`,
+  `fedreg:assertedBy` the maintainer WebID `https://jeswr.org/#me` (set at go-live).
 
 ## Regenerating the committed artifacts
 

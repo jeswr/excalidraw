@@ -27,13 +27,13 @@
       }
     }
   ],
-  "client_id": "https://excalidraw.jeswr.org/clientid.jsonld",
+  "client_id": "https://excalidraw-solid.vercel.app/clientid.jsonld",
   "client_name": "Excalidraw (Solid edition)",
-  "client_uri": "https://excalidraw.jeswr.org/",
-  "logo_uri": "https://excalidraw.jeswr.org/favicon.ico",
+  "client_uri": "https://excalidraw-solid.vercel.app/",
+  "logo_uri": "https://excalidraw-solid.vercel.app/favicon.ico",
   "redirect_uris": [
-    "https://excalidraw.jeswr.org/",
-    "https://excalidraw.jeswr.org/callback.html"
+    "https://excalidraw-solid.vercel.app/",
+    "https://excalidraw-solid.vercel.app/callback.html"
   ],
   "grant_types": [
     "authorization_code",

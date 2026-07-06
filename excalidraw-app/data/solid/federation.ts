@@ -18,14 +18,10 @@
 import { buildRegistry } from "@jeswr/federation-registry";
 
 /**
- * The maintainer WebID that asserts the fork's federation membership.
- *
- * NEEDS:USER — this is a clearly-marked PLACEHOLDER. The real assertion must be made by
- * the federation registry operator / the maintainer's WebID; substitute the maintainer's
- * actual WebID (and re-issue the membership) before the registry goes live.
+ * The maintainer WebID that asserts the fork's federation membership
+ * (set at go-live 2026-07-06; previously a flagged placeholder).
  */
-export const PLACEHOLDER_ASSERTED_BY =
-  "https://jeswr.solidcommunity.net/profile/card#me"; // TODO(needs:user): maintainer WebID.
+export const MAINTAINER_ASSERTED_BY = "https://jeswr.org/#me";
 
 /** Inputs for building the fork's federation registry document. */
 export interface FederationRegistryInput {
@@ -51,7 +47,7 @@ export function buildForkRegistry(input: FederationRegistryInput) {
         id: input.membershipId,
         app: input.clientId,
         status: "Active",
-        assertedBy: input.assertedBy ?? PLACEHOLDER_ASSERTED_BY,
+        assertedBy: input.assertedBy ?? MAINTAINER_ASSERTED_BY,
       },
     ],
   });

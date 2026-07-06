@@ -5,10 +5,10 @@
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#>.
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>.
 
-<https://excalidraw.jeswr.org/federation/registry.ttl> a fedreg:Registry;
-    fedreg:member <https://excalidraw.jeswr.org/federation/registry.ttl#membership>.
-<https://excalidraw.jeswr.org/federation/registry.ttl#membership> a fedreg:Membership;
-    fedreg:app <https://excalidraw.jeswr.org/clientid.jsonld>;
+<https://excalidraw-solid.vercel.app/federation/registry.ttl> a fedreg:Registry;
+    fedreg:member <https://excalidraw-solid.vercel.app/federation/registry.ttl#membership>.
+<https://excalidraw-solid.vercel.app/federation/registry.ttl#membership> a fedreg:Membership;
+    fedreg:app <https://excalidraw-solid.vercel.app/clientid.jsonld>;
     fedreg:status fedreg:Active;
-    fedreg:assertedBy <https://jeswr.solidcommunity.net/profile/card#me>;
-    fedreg:asserted "2026-06-21T11:30:39.483Z"^^xsd:dateTime.
+    fedreg:assertedBy <https://jeswr.org/#me>;
+    fedreg:asserted "2026-07-06T17:04:02.892Z"^^xsd:dateTime.

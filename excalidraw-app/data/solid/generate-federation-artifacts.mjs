@@ -29,13 +29,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(__dirname, "../../..");
 const PUBLIC = resolve(REPO_ROOT, "public");
 
-const CANONICAL_ORIGIN = "https://excalidraw.jeswr.org";
+// The LIVE production origin (Vercel go-live 2026-07-06). `excalidraw.jeswr.org` is the
+// eventual custom domain — regenerate the artifacts with EXCALIDRAW_SOLID_ORIGIN when it lands.
+const CANONICAL_ORIGIN = "https://excalidraw-solid.vercel.app";
 const origin = (process.env.EXCALIDRAW_SOLID_ORIGIN ?? CANONICAL_ORIGIN).replace(/\/$/, "");
 
 const DRAWING_SECTOR = "https://w3id.org/jeswr/sectors/drawing#sector";
 const DRAWING_SCENE_SHAPE = "https://w3id.org/jeswr/drawing#Scene";
-// NEEDS:USER placeholder — replace with the maintainer / registry-operator WebID.
-const ASSERTED_BY = "https://jeswr.solidcommunity.net/profile/card#me";
+// The maintainer / registry-operator WebID asserting the membership (set at go-live).
+const ASSERTED_BY = "https://jeswr.org/#me";
 
 function buildClientIdDocument(o) {
   return {
@@ -96,4 +98,4 @@ console.log(`Wrote federation artifacts for origin ${origin}:`);
 // eslint-disable-next-line no-console
 console.log(`  public/clientid.jsonld         (client_id=${clientId})`);
 // eslint-disable-next-line no-console
-console.log(`  public/federation/registry.ttl (Active membership, assertedBy=${ASSERTED_BY} [NEEDS:USER])`);
+console.log(`  public/federation/registry.ttl (Active membership, assertedBy=${ASSERTED_BY})`);

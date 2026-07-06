@@ -16,9 +16,11 @@ import {
   DRAWING_SECTOR,
   normaliseOrigin,
 } from "./clientid-document";
-import { PLACEHOLDER_ASSERTED_BY, serializeForkRegistry } from "./federation";
+import { MAINTAINER_ASSERTED_BY, serializeForkRegistry } from "./federation";
 
-const CANONICAL_ORIGIN = "https://excalidraw.jeswr.org";
+// The LIVE production origin (Vercel go-live 2026-07-06). `excalidraw.jeswr.org` is the
+// eventual custom domain - regenerate the artifacts + this constant when it lands.
+const CANONICAL_ORIGIN = "https://excalidraw-solid.vercel.app";
 const CLIENT_ID = `${CANONICAL_ORIGIN}/clientid.jsonld`;
 
 // vitest runs from the repo root (the monorepo working dir); the committed federation
@@ -106,9 +108,7 @@ describe("fedreg:Membership registry", () => {
     expect(members).toHaveLength(1);
     expect(members[0].membership?.app).toBe(CLIENT_ID);
     expect(members[0].membership?.status).toBe("Active");
-    expect(members[0].membership?.assertedBy).toContain(
-      PLACEHOLDER_ASSERTED_BY,
-    );
+    expect(members[0].membership?.assertedBy).toContain(MAINTAINER_ASSERTED_BY);
   });
 
   it("the committed public/federation/registry.ttl verifies clean with an Active membership", async () => {

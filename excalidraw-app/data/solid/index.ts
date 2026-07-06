@@ -60,7 +60,7 @@ export {
 } from "./clientid-document";
 export {
   buildForkRegistry,
-  PLACEHOLDER_ASSERTED_BY,
+  MAINTAINER_ASSERTED_BY,
   serializeForkRegistry,
 } from "./federation";
 export {
