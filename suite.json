@@ -1,0 +1,10 @@
+{
+  "$schema": "https://solid.example/suite-tracking/suite.schema.json",
+  "id": "excalidraw",
+  "kind": "app",
+  "name": "Excalidraw (Solid)",
+  "repo": "https://github.com/jeswr/excalidraw",
+  "category": "documents",
+  "maturity": "beta",
+  "visibility": "public"
+}
